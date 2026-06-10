@@ -1,0 +1,24 @@
+package io
+
+// ════════════════════════════════════════════════════════════
+//  io — 文件描述符抽象层
+// ════════════════════════════════════════════════════════════
+//
+//  上接 stdio 这种「写字符串」的 user-facing API，
+//  下接 sysio 这种「真 syscall」的 compiler boundary。
+//
+//  用户角度只看到 fid（文件描述符）一个入符号：
+//      msg >> io.write(1)         // 写到 stdout
+//      data >> io.write(fd)       // 写到任意 fd
+//
+//  内部把 data 转发给 sysio.write(fid)，由 sysio 负责真实 syscall。
+//  这样 stdio / io 都可以保持"纯 Mocker"实现，不出现 syscall 字样。
+
+import sysio
+
+// io.write 写一段字节到文件描述符 fid。
+// 内部调用：data >> sysio.write(fid)
+@write {
+    >> num fid
+    >> str data
+}

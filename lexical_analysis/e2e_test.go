@@ -4,6 +4,7 @@
 package lexical_analysis_test
 
 import (
+	"fmt"
 	"testing"
 
 	"lexical_analysis/internal/dfa"
@@ -114,6 +115,7 @@ func sliceEq(a, b []string) bool {
 	}
 	for i := range a {
 		if a[i] != b[i] {
+			fmt.Println("sss")
 			return false
 		}
 	}

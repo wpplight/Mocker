@@ -1,29 +1,60 @@
-# glex 示例：词法分析器定义文件
+# Mocker DSL — 词法分析器定义（glex）
 #
 # 命名约定：key 用 _ 分割 type 和 name
-#   - "ID"     → type=ID,   name=ID  （这种 type 只有一种 token）
-#   - "OP_ADD" → type=OP,   name=ADD （OP 类里具体的 +）
-#   - "KW_IF"  → type=KW,   name=IF
+#   - "ID"        → type=ID,   name=ID
+#   - "OP_ADD"    → type=OP,   name=ADD
+#   - "KW_IF"     → type=KW,   name=IF
+#   - "TYPE_STR"  → type=TYPE, name=STR
 #
-# 优先级规则：**位置越靠前优先级越高**。
-# - 关键字 (KW_*) 必须放在 ID 之前，否则 "if" 会被识别为 ID
-# - REAL 必须放在 NUM 之前，否则 "123.456" 会被识别为 NUM
-# - 多字符运算符 (<=, >=, ==) 必须放在对应的单字符 (<, >, =) 之前
+# 优先级规则：**位置越靠前优先级越高**
+# 1. 管理字/关键字/内置类型必须早于 ID（否则 "if" 会被吞为 ID）
+# 2. 多字符运算符必须早于对应的单字符（否则 ">>" 会被切为 ">" ">"）
+# 3. CALL (包.方法链) 必须早于 ID
+# 4. EDGE_NAME (连字符标识符) 必须早于 ID，且至少要有一个 "-"
+# 5. 数字统一为 NUM（整数和小数都走同一个 token）
+# 6. 字符串 (STRING) 起始字符 " 不会与其他 token 冲突，但放在前面更安全
 #
-package: mylexer
+# 注：以下 token 由词法分析器的**状态机**产生，不通过正则匹配：
+#   - INDENT  /  DEDENT     (Python 风格缩进，跟踪 { } 与缩进字符数)
+#   - NEWLINE               (换行；用于分号可省的语法场景)
+# 注：注释 // 和 /* */ 由词法层直接跳过；字符串转义 (\" \\ \n \t) 在 lexer 后处理。
+# 注：Mocker DSL 实际 example 中**不出现分号**，但为兼容传统用户，SEMI 仍然可选接收。
+
+package: mocker_lex
 
 tokens:
-  # ───── 关键字（KW 类）：必须早于 ID，否则会被吞为标识符 ─────
+  # ───── 管理字（SYS 类）：必须早于 ID ─────
+  SYS_PACK:   'package'
+  SYS_IMPORT: 'import'
+
+  # ───── 关键字（KW 类）：必须早于 ID ─────
+  KW_ENUM:   'enum'
   KW_IF:     'if'
   KW_ELSE:   'else'
-  KW_FOR:    'for'
-  KW_WHILE:  'while'
-  KW_INT:    'int'
+  KW_RETURN: 'return'
+  KW_TRUE:   'true'
+  KW_FALSE:  'false'
+
+  # ───── 内置类型（TYPE 类）：类型注解用，必须早于 ID ─────
+  TYPE_STR:  'str'
+  TYPE_NUM:  'num'
+  TYPE_BOOL: 'bool'
+  TYPE_BYTE: 'byte'
+  TYPE_ANY:  'any'
 
   # ───── 运算符（OP 类）：多字符优先于单字符 ─────
-  OP_LE:     '<='
-  OP_GE:     '>='
-  OP_EQ:     '=='
+  OP_RRARROW: '>>'          # 数据流 / 导出 / 端口
+  OP_LARROW:  '<<'
+  OP_DEFINE:  ':='          # :=
+  OP_EQ:      '=='
+  OP_NE:      '!='
+  OP_LE:      '<='
+  OP_GE:      '>='
+  OP_AND:     '&&'
+  OP_OR:      '\|\|'        # | 是正则元字符，必须转义
+  OP_NOT:     '!'
+
+  # ───── 运算符（OP 类）：单字符 ─────
   OP_LT:     '<'
   OP_GT:     '>'
   OP_ASSIGN: '='
@@ -32,16 +63,35 @@ tokens:
   OP_MUL:    '\*'
   OP_DIV:    '/'
 
-  # ───── 定界符（SEP 类）─────
-  SEP_LPAREN: '\('
-  SEP_RPAREN: '\)'
-  SEP_LBRACE: '\{'
-  SEP_RBRACE: '\}'
-  SEP_SEMI:   ';'
-  SEP_COMMA:  ','
+  # ───── 标点 / 定界符（SEP 类）─────
+  SEP_AT:        '@'        # 导出标记
+  SEP_LPAREN:    '\('
+  SEP_RPAREN:    '\)'
+  SEP_LBRACE:    '\{'
+  SEP_RBRACE:    '\}'
+  SEP_LBRACKET:  '\['
+  SEP_RBRACKET:  '\]'
+  SEP_SEMI:      ';'        # 总是可选；保留以兼容传统写法
+  SEP_COMMA:     ','
+  SEP_DOT:       '\.'
+  SEP_COLON:     ':'
+
+  # ───── 字面量 ─────
+  # 字符串字面量（基础版本，不处理转义；转义由 lexer 后处理）
+  STRING: '"[^"]*"'
 
   # ───── 通用模式：优先级最低，放在最后 ─────
-  # REAL 必须早于 NUM：让 "123.456" 落到 REAL 而不是 NUM
-  REAL:  '[+\-]?[0-9]+\.[0-9]+'
-  NUM:   '[+\-]?[0-9]+'
-  ID:    '[a-zA-Z_][a-zA-Z0-9_]*'
+  # 数字（整数或小数）：小数部分可选，统一作为 NUM 一个 token
+  # 例：42  /  3.14  /  0  /  0.5
+  NUM: '[0-9]+(\.[0-9]+)?'
+
+  # 包.方法链（stdio.Println、hello.h、a.b.c.d）
+  # 一次匹配整条链；用 "(\. ...)+" 覆盖 1 层及以上的成员访问
+  CALL: '[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)+'
+
+  # 边名（允许连字符，如 out-no-co、send-data）
+  # 至少要有一个 "-"，纯标识符走 ID
+  EDGE_NAME: '[a-zA-Z_][a-zA-Z0-9_]*(-[a-zA-Z_][a-zA-Z0-9_]*)+'
+
+  # 标识符
+  ID:  '[a-zA-Z_][a-zA-Z0-9_]*'

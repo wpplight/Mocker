@@ -1,0 +1,30 @@
+package sysio
+
+// ════════════════════════════════════════════════════════════
+//  sysio — 编译终点（kernel boundary）
+// ════════════════════════════════════════════════════════════
+//
+//  凡是名字带 "sysio." 前缀的节点，编译器一律识别为
+//  内核边界 primitive，并把节点体 emit 成真实的 syscall。
+//
+//  sysio 不依赖任何包，是自举最底部的"锚"。
+//  后续 IR / codegen 阶段会维护一张：
+//      sysio.节点名  →  真实 syscall / 平台调用  的映射表
+//  例如：
+//      sysio.write   →  syscall.Write(fid, data)  (Unix)
+//                    →  WriteFile(handle, data)   (Windows)
+//      sysio.read    →  syscall.Read(fid, buf)
+//      sysio.exit    →  syscall.Exit(code)
+//      sysio.fork    →  syscall.Clone(...) / runtime.GoFork  (自举映射到 goroutine)
+//  ……
+//
+//  本文件只声明节点骨架；body 留空，编译器直接接管。
+
+// sysio.write 把 byte 序列写入文件描述符。
+// 编译器在 IR 阶段看到这个节点会 emit：
+//      n, err := syscall.Write(fid, data)
+//   或平台相关的等价调用。
+@write {
+    >> num fid
+    >> byte data
+}

@@ -1,0 +1,50 @@
+package netio
+
+import net
+
+netio {
+    
+}
+
+enum Method {
+    Post,
+    Get,
+    Delete,
+
+}
+
+@head {
+    str key;
+    str value;
+}
+
+@query {
+    str key;
+    str value;
+}
+
+@Request{
+    body 
+}
+
+@Response{
+
+}
+
+
+@< Post(str router) > {
+    Method method := Post >>
+    >Request* request>
+    >Response* response>
+}
+
+@<Get(str route)> {
+    Method method := Get >
+    >Request* request>
+    >Response* response>
+}
+
+
+@<Listen>{
+    >port>
+}

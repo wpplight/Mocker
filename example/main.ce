@@ -1,0 +1,67 @@
+package main
+
+// ════════════════════════════════════════════════════════════
+//  main — 一个最小可运行的 .ce 程序
+// ════════════════════════════════════════════════════════════
+//
+//  展示节点 / 边 / 并发 fan-out 的写法。
+//  字符串最终会通过：
+//      hello.h  →  say.*  →  stdio.Println  →  io.write(1)  →  sysio.write  →  syscall
+//  完整链路落到终端。
+
+import stdio
+
+// 节点 hello：自带出度 h，节点创建时即执行（"hello world!" 直接流出）
+hello {
+    h := "hello world!"
+    h >>
+}
+
+// 边 hello <out-no-co> say：单链，hello.h 直送 say.hey
+hello <out-no-co> say {
+    hello.h >> say.hey
+}
+
+// 边 hello <out> say：fan-out，同一份 hello.h 并发送入 hay / my / world 三个端口
+// （每条分支在编译器里是一段独立 goroutine）
+hello <out> say {
+    hello.h >>
+    >>say.hay
+    >>say.my
+    >>say.world
+}
+
+// 节点 say：3 个入度端口，每个端口触发一次 stdio.Println
+//   stdio.Println 内部走  io.write(1) → sysio.write(1, data) → syscall.Write(1, ...)
+say {
+    >> str hey
+      hey >> stdio.Println
+
+    >> str my
+        my >> stdio.Println
+
+    // 参数数量和另一边接收数量相同时可以直接传输，名称匹配也行
+    >> str world
+        world >> stdio.Println
+}
+
+// ════════════════════════════════════════════════════════════
+//  入口拓扑（main 保留名约定）
+// ════════════════════════════════════════════════════════════
+//
+//  "main" 是 Mocker 的保留名：
+//    - package main             → 这个文件是程序的入口包
+//    - main { ... } 块          → 程序启动时的初始图结构
+//
+//  块体里每行 `src <edge> dst` 描述一条启动时要建立的连线。
+//  编译器从这个拓扑块直接 emit 启动代码，**不需要单独写 main 函数**。
+//
+//  例子：
+//      hello <out> say
+//  表示：启动时建立 hello → say 的一条边（边名 <out>）。
+//  配合 hello 是无入度节点（创建时自动执行），整个启动流：
+//      hello 创建（auto-exec）→ h 流出 → 沿 <out> 到 say
+//      → 触发 say.hay/my/world 三个 port → 各自走 stdio.Println
+main {
+    hello <out> say
+}

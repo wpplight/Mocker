@@ -8,28 +8,19 @@ import (
 )
 
 func main() {
-	tests := []string{
-		"if x = 10;",
-		"while(x<100){x=x+1;}",
-		"123.456 + 789",
-		"ifoo intvar x123_y",
-		"== <= >=",
-	}
-
-	fail := 0
-	for _, src := range tests {
-		fmt.Printf("--- input: %q\n", src)
-		toks, err := mylexer.Tokenize(src)
-		if err != nil {
-			fmt.Printf("  ERROR: %v\n", err)
-			fail++
-			continue
-		}
-		for _, t := range toks {
-			fmt.Printf("  %s\n", t)
-		}
-	}
-	if fail > 0 {
+	path := "examples/main.mocker"
+	src, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
 		os.Exit(1)
 	}
+
+	toks, err := mylexer.Tokenize(string(src))
+	if err != nil {
+		fmt.Printf("  ERROR: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("  %s\n", toks)
+
 }

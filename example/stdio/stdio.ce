@@ -1,0 +1,36 @@
+package stdio
+
+// ════════════════════════════════════════════════════════════
+//  stdio — user-facing stdio 库
+// ════════════════════════════════════════════════════════════
+//
+//  这是用户唯一应该 import 的 stdio 包。
+//  它通过 io.write 调用文件描述符写入，io.write 再调 sysio.write。
+//
+//  层次：
+//      stdio.Println  ──►  io.write(1)  ──►  sysio.write(fid, data)  ──►  syscall
+//
+//  用户永远不应该直接写 /proc/self/fd/1 或调 syscall；
+//  stdio / io / sysio 三层负责把"语义"和"机制"分干净。
+
+import io
+
+// Println 输出字符串 + 换行到 stdout。
+// 入符号：msg (str)
+// 内部：msg >> io.write(1)  +  "\n" >> io.write(1)
+@Println {
+    >> str msg
+    nl := "\n"
+    num fid =1 
+    fid >>
+    msg+nl >>
+}
+
+Println <write> io.write{
+    Println.fid>>io.write.fid
+    Prinln.msg>>io.write.data
+}
+
+stdio{
+    Println <write> io.write
+}

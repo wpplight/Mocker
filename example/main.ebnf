@@ -1,0 +1,313 @@
+(* ============================================================
+ *  Mocker DSL — EBNF Grammar
+ *  Reference: example/main.mocker
+ *
+ *  目的：手写 AST 语法分析器时使用的形式化语法定义
+ *  约定：
+ *    - 终结符（terminal）用大写或引号包围
+ *    - 非终结符（non-terminal）用 PascalCase
+ *    - 注释: (* ... *)
+ *    - ?: 0..1  (可选)
+ *    - *: 0..N  (零或多)
+ *    - +: 1..N  (一或多)
+ * ============================================================ *)
+
+(* ---------- 词法层 Token 定义（终结符） ---------- *)
+TOKEN
+  = PACKAGE | IMPORT | AT | ENUM
+  | IF | ELSE | RETURN
+  | TRUE | FALSE
+  | IDENT | STRING | NUM
+  | LBRACE | RBRACE | LBRACKET | RBRACKET
+  | LPAREN | RPAREN | LT | GT
+  | SEMI   (* ; —— 总是可选 *)
+  | PLUS | MINUS | STAR | SLASH
+  | EQ | NE | LE | GE
+  | AND | OR | NOT
+  | DEFINE   (* := *)
+  | RRARROW  (* >> 数据流/导出/端口 *)
+  | LARROW   (* << *)
+  | NEWLINE  (* \n / \r\n —— 仅在 INDENT/DEDENT 上下文外有意义 *)
+  | INDENT | DEDENT          (* 缩进 token：端口体 / 续行体使用 *)
+  | EOF
+  ;
+
+(* 边名允许出现连字符：<out-no-co> / <send-data> 等
+   词法层将 out-no-co 视为一个 token，语法层用 EdgeName 抽象 *)
+EdgeName
+  = IDENT | EDGE_IDENT
+  ;
+
+(* ---------- 入口：整个文件 ---------- *)
+File
+  = PackageClause ImportClause* TopDecl* EOF
+  ;
+
+PackageClause
+  = "package" IDENT
+  ;
+
+ImportClause
+  = "import" IDENT
+  ;
+
+(* ---------- 顶层声明分发 ---------- *)
+TopDecl
+  = ImportClause
+  | EnumDecl
+  | StructDecl            (* 结构体 / 节点 / 边（单边 <name>{...}） *)
+  | EdgeDecl              (* 边声明（带源/汇的完整形式） *)
+  | FuncDecl              (* 普通函数 / 主入口 main { ... } *)
+  ;
+
+(* ---------- 枚举 ---------- *)
+EnumDecl
+  = "enum" IDENT "{" EnumValue ("," EnumValue)* ","? "}" ";"?
+  ;
+EnumValue
+  = IDENT
+  ;
+
+(* ---------- 结构体 / 节点 / 边（单边） ----------
+ *   - 普通结构体（cookie.mocker 风格）：name { str Domain; bool Secure; }
+ *   - 节点（main.mocker 中 hello{} / say{}）：name { ... }
+ *   - 边（旧的单边形式）：<name> { ... }
+ *)
+StructDecl
+  = ExportMarker? IDENT "{" StructMember* "}" ";"?
+  | ExportMarker? "<" EdgeName ">" "{" StructMember* "}" ";"?
+  ;
+ExportMarker
+  = "@"
+  ;
+
+(* ---------- 边声明（带源/汇的完整形式） ----------
+ *   hello <out-no-co> say { ... }
+ *   nodeA  <edge>  nodeB  { ... }
+ * 边名可以带连字符，源/汇节点名是普通 IDENT
+ *)
+EdgeDecl
+  = IDENT "<" EdgeName ">" IDENT "{" Stmt* "}" ";"?
+  ;
+
+(* ---------- 结构体/节点/边体内的成员 ----------
+ * 注：节点 vs 边 共用一套规则；靠 StructMember 的不同分支区分场景。
+ *)
+StructMember
+  = PortDecl                                       (* 0. >> str hey —— 仅节点体 *)
+  | TypeRef IDENT ( "{" Stmt* "}" )? ExportSuffix? ";"?   (* 1. 强类型字段 *)
+  | IDENT ":=" Expr ExportSuffix? ";"?                     (* 2. 变量声明 *)
+  | IDENT ExportSuffix? ";"?                                (* 3. 裸字段 / 导出字段 *)
+  ;
+
+(* 端口/分支声明：>> Type Name  后接一个缩进体
+ *   say{
+ *       >> str hey
+ *           hey >> stdio.Println       ← INDENT 之后是端口内的语句
+ *   }
+ * 端口体使用 INDENT/DEDENT 划分（类似 Python 缩进）
+ *)
+PortDecl
+  = ">>" TypeRef IDENT ( INDENT Stmt+ DEDENT )? ";"?
+  ;
+
+(* 字段后的导出后缀：>> 链；尾部可空（仅暴露）或带 1..N 个目标（重命名 / 链式） *)
+ExportSuffix
+  = ">>" ( FlowElem ( ">>" FlowElem )* )?
+  ;
+
+(* 数据流中的一个元素 *)
+FlowElem
+  = IdentChain ( "(" ArgList? ")" )?
+  | STRING
+  ;
+
+(* ---------- 函数（含 main） ---------- *)
+FuncDecl
+  = ExportMarker? FuncName FuncSig? "{" Stmt* "}" ";"?
+  ;
+FuncName
+  = IDENT                            (* main / login / Post ... *)
+  ;
+FuncSig
+  = "(" ParamList? ")"               (* 圆括号签名：login(str name) *)
+  | "<" ParamList? ">"               (* 尖括号签名：<Post(str router)> *)
+  ;
+ParamList
+  = Param ("," Param)*
+  ;
+Param
+  = TypeRef IDENT
+  ;
+
+(* ---------- 类型 ---------- *)
+TypeRef
+  = TypeArray
+  | TypePtr
+  | TypeName
+  ;
+TypeArray
+  = TypeRef "[" "]"                  (* cookie[] *)
+  ;
+TypePtr
+  = "*" TypeRef                      (* *nio.context *)
+  ;
+TypeName
+  = IDENT                            (* str | num | bool | 用户自定义 *)
+  ;
+
+(* ---------- 语句 ----------
+ * 注意：Connection 形式是 Mocker 图语法的核心：
+ *       hello <out> stdio.Println      (节点 → 边 → 调用)
+ *       hello <out> say               (节点 → 边 → 节点)  ← 新增
+ *)
+Stmt
+  = IfStmt
+  | ReturnStmt
+  | Connection                       (* 图连接 *)
+  | FlowStmt                         (* >> 链（支持单行/跨行） *)
+  | FlowCont                         (* >> 续行（节点体/边体内） *)
+  | VarDecl
+  | AssignStmt
+  ;
+
+BlockStmt
+  = "{" Stmt* "}"
+  ;
+
+IfStmt
+  = "if" Expr BlockStmt ( "else" ( IfStmt | BlockStmt ) )?
+  ;
+
+ReturnStmt
+  = "return" Expr? ";"?
+  ;
+
+(* 顶层或函数体内的变量声明 *)
+VarDecl
+  = TypeRef? IDENT (":=" Expr)? ExportSuffix? ";"?
+  ;
+
+(* 变量赋值：a, b := expr *)
+AssignStmt
+  = IDENT ("," IDENT)+ ":=" Expr ";"?
+  ;
+
+(* ---------- 图连接（Connection） ----------
+ * 一条 Connection 由若干 ConnectionHop 拼成，hop 之间用空白分隔：
+ *   hello <out> stdio.Println
+ *   <req>   parse   <res>   send
+ *   hello <out> say                  ← 节点 → 边 → 节点
+ * 语法层：靠下一个 token 消歧（`>` 开头→EdgeRef，否则→IdentRef）
+ *)
+Connection
+  = ConnectionHop (ConnectionHop)+ ";"?
+  ;
+
+ConnectionHop
+  = EdgeRef
+  | IdentRef
+  ;
+
+EdgeRef
+  = "<" EdgeName ">"
+  ;
+
+IdentRef
+  = IdentChain ( "(" ArgList? ")" )?    (* hello  /  stdio.Println  /  stdio.Println(x) *)
+  ;
+
+(* ---------- 数据流 >> 链（支持单行 / 跨行两种写法） ----------
+ * 单行：  a >> b >> c
+ * 跨行：  a >>
+ *        >> b
+ *        >> c
+ * 跨行时，行尾的 >> 与下一行行首的 >> 配对，语法上等同于一个 >>。
+ *)
+FlowStmt
+  = FlowElem ( ChainOp FlowElem )* ";"?
+  ;
+
+(* 链式操作符：单行 >>  或  跨行 >> >>  (两条 >> 紧凑相邻) *)
+ChainOp
+  = ">>" ">>"
+  | ">>"
+  ;
+
+(* 节点体 / 边体内的续行：每行以 >> 开头，承载一个 FlowElem
+ *   hello <out> say {
+ *       hello.h>>     ← 这是 FlowStmt 的首段
+ *       >>say.hay     ← 这是 FlowCont
+ *       >>say.my
+ *   }
+ * FlowCont 允许在同一作用域内堆叠，但最自然的写法是把整条链写成一个 FlowStmt。
+ *)
+FlowCont
+  = ">>" FlowElem ( ChainOp FlowElem )* ";"?
+  ;
+
+(* 链式标识符：a / a.b / a.b.c *)
+IdentChain
+  = IDENT ("." IDENT)*
+  ;
+
+(* ---------- 表达式（Pratt 风格，左结合） ----------
+ * 优先级（高 → 低）：
+ *   7  .  (成员访问)
+ *   6  *  /
+ *   5  +  -
+ *   4  <  >  <=  >=
+ *   3  == !=
+ *   2  &&
+ *   1  ||
+ *)
+Expr
+  = LogicOr
+  ;
+LogicOr
+  = LogicAnd ( "||" LogicAnd )*
+  ;
+LogicAnd
+  = Equality ( "&&" Equality )*
+  ;
+Equality
+  = Relational ( ("==" | "!=") Relational )*
+  ;
+Relational
+  = AddSub ( ("<" | ">" | "<=" | ">=") AddSub )*
+  ;
+AddSub
+  = MulDiv ( ("+" | "-") MulDiv )*
+  ;
+MulDiv
+  = Unary ( ("*" | "/") Unary )*
+  ;
+Unary
+  = ("-" | "!")? Member
+  ;
+Member
+  = Primary ( "." IDENT )*
+  ;
+Primary
+  = Call
+  | Literal
+  | IDENT
+  | "(" Expr ")"
+  ;
+
+Call
+  = Member "(" ArgList? ")"
+  ;
+ArgList
+  = Expr ("," Expr)*
+  ;
+
+Literal
+  = STRING | NUM | TRUE | FALSE
+  ;
+
+(* ---------- 注释 / 空白（词法层吸收，不进 AST） ---------- *)
+Comment
+  = "//" { ANY }* EOL
+  | "/*" { ANY }* "*/"
+  ;

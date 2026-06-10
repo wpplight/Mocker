@@ -1,0 +1,23 @@
+package stdio
+
+// ════════════════════════════════════════════════════════════
+//  to_string — 把任意值转成 str
+// ════════════════════════════════════════════════════════════
+//
+//  把 num / bool / 节点 等转成字符串表示，供 stdio.Println / 调试用。
+//  通过 io.write(1) 落盘到 stdout（实际走 sysio 边界）。
+
+import io
+
+enum Type {
+    Slice,
+    Num,
+    Str,
+    Node,
+}
+
+// to_string 把任意值转成 str
+@to_string {
+    >> str s
+    s >> io.write(1)
+}

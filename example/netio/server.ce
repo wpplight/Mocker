@@ -1,0 +1,16 @@
+package netio
+
+import net
+
+@Server {
+    >>num port{}
+
+    
+
+    >>Method mothod{
+
+    }
+
+    
+
+}

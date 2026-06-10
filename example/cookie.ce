@@ -1,0 +1,19 @@
+package cookie
+
+@cookie {
+    str Domain;
+    str Path;
+    str Expires;
+    num Max-Age;
+    bool Secure;
+    bool HttpOnly;
+    str SameSite;
+    bool Partitioned;
+}
+
+@cookie_build {
+    cookie[] cookies;
+    
+}
+
+
