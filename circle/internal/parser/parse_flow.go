@@ -80,10 +80,19 @@ func (p *Parser) parseFlowStmt() *ast.FlowStmt {
 	first := p.parseFlowStep()
 	steps := []*ast.FlowStep{first}
 
+	// 上一行非空白 token 的行号（行号追踪，防 >> 跨行误吃新 port decl）
+	lastNonWSLine := first.Pos().Line
+
 	loopGuard := 0
 	for p.match(mocker_lex.TypeOP_RRARROW) {
+		// 关键：跨行的 >> 停下，让外层处理（>>type name 之类）
+		if p.peek().Pos.Line != lastNonWSLine {
+			break
+		}
+
 		startPos := p.pos
 		p.consume(mocker_lex.TypeOP_RRARROW)
+		lastNonWSLine = p.peek().Pos.Line
 
 		// 见到第二个 >> 立即停：那是 fan-out 边界，不归本函数管
 		if p.match(mocker_lex.TypeOP_RRARROW) {
@@ -93,6 +102,7 @@ func (p *Parser) parseFlowStmt() *ast.FlowStmt {
 			break
 		}
 		steps = append(steps, p.parseFlowStep())
+		lastNonWSLine = steps[len(steps)-1].Pos().Line
 
 		if p.pos == startPos {
 			p.errorf("parseFlowStmt stuck, advancing")
@@ -116,8 +126,18 @@ func (p *Parser) parseFlowCont() *ast.FlowCont {
 	pos := p.consume(mocker_lex.TypeOP_RRARROW).Pos
 	steps := []*ast.FlowStep{p.parseFlowStep()}
 
+	// 上一行非空白 token 的行号
+	lastNonWSLine := steps[0].Pos().Line
+
 	for p.match(mocker_lex.TypeOP_RRARROW) {
+		// 跨行的 >> 停下
+		if p.peek().Pos.Line != lastNonWSLine {
+			break
+		}
+
 		p.consume(mocker_lex.TypeOP_RRARROW)
+		lastNonWSLine = p.peek().Pos.Line
+
 		// 见到第二个 >> 立即停：fan-out 边界
 		if p.match(mocker_lex.TypeOP_RRARROW) {
 			break
@@ -126,6 +146,7 @@ func (p *Parser) parseFlowCont() *ast.FlowCont {
 			break
 		}
 		steps = append(steps, p.parseFlowStep())
+		lastNonWSLine = steps[len(steps)-1].Pos().Line
 	}
 	return &ast.FlowCont{PosBase: ast.PosBase{P: pos}, Steps: steps}
 }
@@ -221,20 +242,60 @@ func (p *Parser) parseFlowBranch() *ast.FlowBranch {
 //   - ">>"            （裸 >>，无 target）
 //   - ">> msg"        （单 target，可选重命名）
 //   - ">> msg >> tgt" （多 target 链）
+//
+// 行号追踪（关键）：
+//
+//	链里的 >> 必须和上一个**非空白 token 在同一行**。
+//	跨行的 >>（如 "hey >>\n    >>std..."）会停下，把 >> 留给外层
+//	parseStructMember 当 PortDecl 起始（形如 >>type name）。
+//
+//	副作用：多行 chain extra >> 的写法被打破（hey >>\n    >>target），
+//	那种情况请改成 hey >>\n    target（无 extra >>）即可。
 func (p *Parser) parseFlowChain() *ast.FlowChain {
 	chain := &ast.FlowChain{}
 	loopGuard := 0
+
+	// 上一行非空白 token 的行号（用来判断当前 >> 是同链续行还是新 port decl）
+	lastNonWSLine := -1
+	if p.pos > 0 {
+		lastNonWSLine = p.tokens[p.pos-1].Pos.Line
+	}
+
 	for p.match(mocker_lex.TypeOP_RRARROW) {
+		// 关键：行号不匹配 → 这是新行起始的 >>，很可能是 port decl
+		// (>>type name)，不要消费
+		if lastNonWSLine >= 0 && p.peek().Pos.Line != lastNonWSLine {
+			break
+		}
+
 		startPos := p.pos
+		// 关键：先存 >> 的行号，消费后 p.peek() 已是下一个 token
+		rrLine := p.peek().Pos.Line
 		p.consume(mocker_lex.TypeOP_RRARROW)
+		lastNonWSLine = rrLine
 
 		// 多行续行：跳过连续的 >>(没有 target 紧跟的情况)
 		for p.match(mocker_lex.TypeOP_RRARROW) {
-			p.consume(mocker_lex.TypeOP_RRARROW)
+			// 同上行：直接消费
+			if p.peek().Pos.Line == lastNonWSLine {
+				rrLine2 := p.peek().Pos.Line
+				p.consume(mocker_lex.TypeOP_RRARROW)
+				lastNonWSLine = rrLine2
+			} else {
+				// 跨行的 >> 可能是 chain extra (>>\n>>target)，
+				// 也可能是下一个 port decl。停下让外层看。
+				break
+			}
 		}
 
 		// 如果没有 target（如 "h >>" 在 struct body 末尾），跳出
 		if !p.isFlowTargetStart() {
+			break
+		}
+
+		// 关键：target 也必须在同行。跨行的 target（如 "fid >>\n    data..."）
+		// 是下一个 port decl / var decl 的开头，不要吞。
+		if p.peek().Pos.Line != lastNonWSLine {
 			break
 		}
 
@@ -245,6 +306,8 @@ func (p *Parser) parseFlowChain() *ast.FlowChain {
 			step.As = p.consume(mocker_lex.TypeID).Value
 		}
 		chain.Steps = append(chain.Steps, step)
+		// 当前 step 末尾的行号作为下一轮 lastNonWSLine
+		lastNonWSLine = step.Pos().Line
 
 		// 防死循环
 		if p.pos == startPos {
@@ -279,7 +342,7 @@ func (p *Parser) isFlowTargetStart() bool {
 //   - 单个标识符    foo
 //   - 成员链        sysio.write  /  pkg.foo.bar
 //   - 函式调用      sysio.write(fid)   ← 用于「data >> sysio.write(fid)」这种
-//                                      内层节点带参数的形式
+//     内层节点带参数的形式
 //   - 任意表达式    msg+nl  /  a*b  /  (a+b)*c   ← 走 FlowExpr（fallback）
 func (p *Parser) parseFlowStep() *ast.FlowStep {
 	pos := p.peek().Pos

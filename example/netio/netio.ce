@@ -1,50 +1,60 @@
 package netio
 
-import net
+// ════════════════════════════════════════════════════════════
+//  netio — HTTP 网络 I/O 包
+// ════════════════════════════════════════════════════════════
+//
+//  暴露节点：@head / @query / @Request / @Response / @Post / @Get / @Listen
+//  依赖：net  (注：net 包还没实现，先注释掉；自举前需要补一个 Go 写的 runtime)
+//  使用方式：
+//      Listen <accept> Post   // 启动监听，把请求转给 Post 节点
+//      Post  <out>     Stdout // Post 处理后输出到 stdout（dev 模式）
 
-netio {
-    
-}
-
+// HTTP 方法枚举
 enum Method {
-    Post,
-    Get,
-    Delete,
-
+    Post
+    Get
+    Delete
 }
 
+// HTTP header 键值对
 @head {
-    str key;
-    str value;
+    str key
+    str value
 }
 
+// URL query 键值对
 @query {
-    str key;
-    str value;
+    str key
+    str value
 }
 
-@Request{
-    body 
+// HTTP request —— 入度：body
+@Request {
+    >> byte body
 }
 
-@Response{
-
+// HTTP response —— 出度：status / headers / body
+@Response {
 }
 
-
-@< Post(str router) > {
-    Method method := Post >>
-    >Request* request>
-    >Response* response>
+// POST handler —— 入度：route / request；出度：response / method
+@Post {
+    >> str route
+    >> Request request
+    Response response >>
+    method := Post >>
 }
 
-@<Get(str route)> {
-    Method method := Get >
-    >Request* request>
-    >Response* response>
+// GET handler —— 入度：route / request；出度：response / method
+@Get {
+    >> str route
+    >> Request request
+    Response response >>
+    method := Get >>
 }
 
-
-@<Listen>{
-    >port>
+// 监听端口 —— 入度：port
+@Listen {
+    >> num port
 }

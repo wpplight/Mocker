@@ -821,20 +821,22 @@ $ curl -X POST http://localhost:8080/api/login \
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | **M0** | glex 词法层（独立仓库 lexical_analysis/） | ✅ 已完成 |
-| **M1** | Mocker 编译器骨架 + lexer（读取 .mocker → tokens） | 🔜 下一步 |
-| **M2** | parser（tokens → AST，含 YAML 缩进敏感解析） | |
-| **M3** | semantic（类型检查 + 引用解析 + 模板 parse） | |
-| **M4** | ir + codegen（AST → Go 源码 → 单二进制） | |
-| **M5** | runtime 库（faker / hash / template / router） | |
-| **M6** | CLI（mocker build / run / validate） | |
+| **M1** | Mocker 编译器骨架 + lexer（手写 .ce 词法分析 `mocker_lex`） | ✅ 已完成 |
+| **M2** | parser（tokens → AST，含 fan-out / 拓扑块 / 入口保留名 `main`） | ✅ 已完成 |
+| **M3** | semantic（类型检查 + 引用解析 + 跨包 + 拓扑校验） | ❌ 未开始 |
+| **M4** | ir + codegen（AST → Go 源码 → 单二进制） | ❌ 未开始 |
+| **M5** | runtime 库（sysio / io / stdio — Go 写，自举友好） | ❌ 未开始 |
+| **M6** | CLI（circle build / run / validate） | ❌ 未开始 |
 | **M7** | 端到端：crud.mocker → 二进制 → curl 通过 | |
 | **M8** | examples/basic / auth / crud 三个示例 | |
 | **M9** | 文档（DSL 参考手册 + 模板 FuncMap 参考） | |
 | **M10** | CI / release（GitHub Actions 发二进制） | |
 
-> **当前已完成**：M0（glex 词法层），独立仓库 `lexical_analysis/`。
->
-> **下一步**：M1（compiler 骨架 + lexer 复用 glex 思路做 .mocker 词法分析）。
+> **当前已完成**：M0（glex 词法层）+ M1（编译器骨架 + 手写 `mocker_lex`）+ M2（parser + AST）。
+> 后缀已从 `.mocker` 改为 `.ce`（自举目标）。
+> 5 个 example .ce 文件 0 error pass。
+
+> **下一步**：M3（semantic 语义分析）— 详见 [circle/docs/roadmap.md](../circle/docs/roadmap.md)。
 
 ---
 

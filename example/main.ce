@@ -6,7 +6,7 @@ package main
 //
 //  展示节点 / 边 / 并发 fan-out 的写法。
 //  字符串最终会通过：
-//      hello.h  →  say.*  →  stdio.Println  →  io.write(1)  →  sysio.write  →  syscall
+//      hello.h  →  say.*  →  stdio.Println  →  io.write(1)  →  SYSCALL  →  syscall
 //  完整链路落到终端。
 
 import stdio
@@ -26,7 +26,7 @@ hello <out-no-co> say {
 // （每条分支在编译器里是一段独立 goroutine）
 hello <out> say {
     hello.h >>
-    >>say.hay
+    >>say.hey
     >>say.my
     >>say.world
 }

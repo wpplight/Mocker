@@ -107,7 +107,12 @@ func (p *Parser) parseFile() *ast.File {
 				d = p.parseTopDecl()
 			}
 		case mocker_lex.TypeOP_LT:
-			d = p.parseStruct() // <out> 单边形式
+			// Style 2 语法糖：<edge_name> { body } —— 编译器从 body 推导 src/dst
+			if p.isEdgeDeclSugarSig() {
+				d = p.parseEdgeDeclSugar(p.peek().Pos)
+			} else {
+				d = p.parseStruct() // <out> 单边形式
+			}
 		default:
 			p.errorf("unexpected token %s at top level", p.peek().Type)
 			p.pos++
@@ -243,12 +248,21 @@ func (p *Parser) parseTopologyDecl() *ast.TopologyDecl {
 			continue
 		}
 
+		// 可选 body：{ FlowStmt / FlowCont / FlowFanout }
+		// 例：write <syscall> SYSCALL { write.fid >> SYSCALL.fid; write.data >> SYSCALL.data }
+		var body []ast.Stmt
+		if p.match(mocker_lex.TypeSEP_LBRACE) {
+			p.consume(mocker_lex.TypeSEP_LBRACE)
+			body = p.parseStmts() // 复用普通语句解析（支持 FlowStmt / FlowCont / FlowFanout）
+			p.consume(mocker_lex.TypeSEP_RBRACE)
+		}
+
 		edges = append(edges, &ast.EdgeDecl{
 			PosBase: ast.PosBase{P: edgePos},
 			Src:     src,
 			Edge:    edgeName,
 			Dst:     dst,
-			// Body: nil —— 拓扑条目无 body
+			Body:    body,
 		})
 	}
 	p.consume(mocker_lex.TypeSEP_RBRACE)

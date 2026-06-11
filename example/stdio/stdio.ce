@@ -5,10 +5,10 @@ package stdio
 // ════════════════════════════════════════════════════════════
 //
 //  这是用户唯一应该 import 的 stdio 包。
-//  它通过 io.write 调用文件描述符写入，io.write 再调 sysio.write。
+//  它通过 io.write 调用文件描述符写入，io.write 内部路由到 SYSCALL 保留字。
 //
 //  层次：
-//      stdio.Println  ──►  io.write(1)  ──►  sysio.write(fid, data)  ──►  syscall
+//      stdio.Println  ──►  io.write(1)  ──►  SYSCALL  ──►  syscall.Write
 //
 //  用户永远不应该直接写 /proc/self/fd/1 或调 syscall；
 //  stdio / io / sysio 三层负责把"语义"和"机制"分干净。
@@ -17,18 +17,20 @@ import io
 
 // Println 输出字符串 + 换行到 stdout。
 // 入符号：msg (str)
-// 内部：msg >> io.write(1)  +  "\n" >> io.write(1)
+// 出符号：fid (num), data (str)   ← 出度必须有自己的属性名（block 模型规定）
 @Println {
     >> str msg
     nl := "\n"
-    num fid =1 
+    num fid = 1            // 显式类型变量：= 号
     fid >>
-    msg+nl >>
+    data := msg + nl       // 类型推断：:= 号，data 是 str（推断自 msg+nl）
+    data >>                // 显式出度：data（= msg+"\n"）
 }
 
-Println <write> io.write{
+// Style 2 语法糖：<write> { body } —— src/dst 由编译器从 body 推导
+<write> {
     Println.fid>>io.write.fid
-    Prinln.msg>>io.write.data
+    Println.data>>io.write.data
 }
 
 stdio{

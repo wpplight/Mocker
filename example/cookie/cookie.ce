@@ -1,0 +1,20 @@
+package cookie
+
+// HTTP cookie（数据结构，不是节点）
+// 注意：标识符不能用连字符 "Max-Age" 会被 lexer 拆成 "Max - Age"，
+// 改用驼峰 MaxAge。
+@cookie {
+    str Domain;
+    str Path;
+    str Expires;
+    num MaxAge;
+    bool Secure;
+    bool HttpOnly;
+    str SameSite;
+    bool Partitioned;
+}
+
+// 批量 cookie builder（数组语法暂未支持，先用任意 any）
+@cookie_build {
+    any cookies
+}

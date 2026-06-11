@@ -1,0 +1,37 @@
+package io
+
+// ════════════════════════════════════════════════════════════
+//  io — syscall 边界（user-facing API）
+// ════════════════════════════════════════════════════════════
+//
+//  上接 stdio 这种「写字符串」的 user-facing API，
+//  下接 SYSCALL 这个编译器内置保留字（直接 emit 成 syscall.Write）。
+//
+//  用户角度只看到 fid（文件描述符）一个入符号：
+//      msg >> io.write(1)         // 写到 stdout
+//      data >> io.write(fd)       // 写到任意 fd
+//
+//  io 内部通过 <syscall> 边对接 SYSCALL 保留字，编译器看到这条边
+//  会直接 emit `syscall.Write(fid, []byte(data))`。
+//
+//  注意：SYSCALL 是保留字（编译器内置原始节点），不是 .ce 文件。
+//  编译器对 SYSCALL 的处理是硬编码的 emit 模板，不依赖任何 .ce 文件。
+//
+//  层次：
+//      stdio.Println  ──►  io.write  ──►  SYSCALL  ──►  syscall.Write
+//                                       (保留字)      (Go syscall)
+
+// io.write 写一段字节到文件描述符 fid
+// 内部通过 <syscall> 边对接 SYSCALL 保留字
+@write {
+    >> num fid
+    >> str data
+}
+
+// io 包的内部拓扑：write 的 fid/data 流到 SYSCALL，触发 syscall
+io {
+    write <syscall> SYSCALL {
+        write.fid >> SYSCALL.fid
+        write.data >> SYSCALL.data
+    }
+}

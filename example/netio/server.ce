@@ -1,16 +1,7 @@
 package netio
 
-import net
-
+// HTTP server —— 入度：port / method；用于承接 Listen 和 Post/Get 之间的连线
 @Server {
-    >>num port{}
-
-    
-
-    >>Method mothod{
-
-    }
-
-    
-
+    >> num port
+    >> Method method
 }

@@ -92,9 +92,240 @@ import <pkgname>
 
 ---
 
-## 三、三大第一公民：节点 / 边 / 拓扑块
+## 三、Mocker 的核心抽象
 
 > 这是 Mocker 与一般命令式语言最大的区别 —— **图是第一公民**。
+
+### 3.0 Block 模型（底层图结构）
+
+按用户拍板：Mocker 是**纯图语言**——没有"port"这个概念，只有**入度（in）**和**出度（out）**：
+
+```
+节点 = 1 个内含 n 个 block 的图
+    ↓
+每个 block 有 a 个入度（>> type name）和 b 个出度（name >>）
+    ↓
+block 里生成的变量生命周期 == block 生命周期
+    ↓
+a=0 的 block = auto-exec（创建 node 时跑一次）
+    ↓
+"node.x" 外部访问 = 某个 block 的入度或出度
+```
+
+**关键术语**（按用户拍板，语义层全部对齐）：
+- **入度（In）** = 数据流进 block 的入口（`>> type name`），有声明类型
+- **出度（Out）** = block 计算出往外送的值（`name >>`），无显式类型
+- **没有"port"这个概念** —— 只用图论里的入度/出度
+
+#### 3.0.1 保留字（内置原始节点）
+
+按用户拍板保留**几个关键字**作为编译器内置原始节点 —— **不是 .ce 文件里的节点**，编译器自带 emit 模板：
+
+| 关键字 | 含义 | 编译器 emit |
+| --- | --- | --- |
+| `SYSCALL` | 系统调用边界 | 根据边的 body + 边名生成对应 syscall（如 `<syscall>` → `syscall.Write(fid, data)`）|
+| `EXIT` | 进程退出 | `os.Exit(code)`（规划中）|
+| `ALLOC` | 内存分配 | `make([]byte, size)`（规划中）|
+
+**使用方式**：通过**保留边**（保留名 `<syscall>` 等）+ 保留节点（`SYSCALL`）的组合：
+
+```ce
+@write {
+    >> num fid
+    >> str data
+}
+
+io {
+    write <syscall> SYSCALL {
+        write.fid >> SYSCALL.fid
+        write.data >> SYSCALL.data
+    }
+}
+```
+
+编译器看到 `<syscall>` 边对接 `SYSCALL` 时，直接 emit `syscall.Write(fid, []byte(data))`，不需要任何 .ce 文件定义 SYSCALL。
+
+**语义层识别**：`semantic.IsReservedNode("SYSCALL")` 返回 true，跨包查找时优先匹配。
+
+#### 3.0.2 Block 的多位置 + 优化设计
+
+**多个 block 可以散布**（用户拍板）：
+- 一个节点可以包含 **n 个 block**
+- 每个 block 有 a 个入度和 b 个出度
+- **blocks 在源码里不必连续** —— 出度和入度可以在不同位置
+- 编译器按需优化：某个 block 如果没被任何边引用 → **不 emit**
+
+#### 3.0.3 边定义的两种形式（Style 1 + Style 2）
+
+**Style 1（标准形式）**：`src <edge_name> dst { body }`
+
+```ce
+Println <write> io.write {
+    Println.fid >> io.write.fid
+    Println.data >> io.write.data
+}
+```
+
+- **图结构清晰**：一眼看到 src/dst
+- **适合 top-level edge + 跨包引用**
+
+**Style 2（语法糖，仅紧凑场景）**：`<edge_name> { body }`
+
+```ce
+<write> {
+    Println.fid >> io.write.fid
+    Println.data >> io.write.data
+}
+```
+
+- **省略 src/dst**，编译器从 body 推导
+- **限制**：body 必须有唯一 src 和唯一 dst（fan-out / 多源不支持）
+- **推导失败时报错**：提示用 Style 1 显式指明
+- **适用场景**：单 src + 单 dst 的内部边，代码更紧凑
+
+| 情况 | Style 2 处理 |
+| --- | --- |
+| 单 src + 单 dst（不同 attr）| ✅ 推导 |
+| 多 src（多前缀不同）| ❌ 报错：用 Style 1 |
+| 多 dst（fanout）| ❌ 报错：用 Style 1 |
+| 单 ident（`fid>>fid`）| ❌ 报错：src/dst 不可推导，用 Style 1 |
+
+**编译器判定**：`InferEdgeEndpoints` 在解析后扫描 body 收集前缀集合，校验唯一性后填回 edge.Src / edge.Dst。
+
+#### 3.0.4 每个包都有自己的 Topology
+
+**Topology（拓扑块）= 每个包都可以有**（不只 main）：
+
+| 包类型 | Topology 含义 |
+| --- | --- |
+| `main` 包 | **启动序列**（程序从哪里开始跑）|
+| 其他包 | **内部路由**（包内数据怎么流向其他节点）|
+
+例：stdio 包有内部拓扑，告诉编译器"stdio 包内，Println 收到的数据应该路由给 io.write"：
+
+```ce
+package stdio
+
+@Println { ... }
+
+stdio {
+    Println <write> io.write
+}
+```
+
+**编译器对两种拓扑的处理一致**：填 UsedBlocks + 算 AutoExecNodes + emit 内部 wiring 代码。
+
+#### 3.0.5 拓扑块内的 inline edge（一次性使用边）
+
+拓扑块里的 edge 可以带 body，形成**一次性使用边**（语法糖）：
+
+```ce
+io {
+    write <syscall> SYSCALL {
+        write.fid >> SYSCALL.fid
+        write.data >> SYSCALL.data
+    }
+}
+```
+
+对比 top-level EdgeDecl + 拓扑引用：
+- top-level EdgeDecl + 拓扑无 body = "复用边"
+- 拓扑内 inline body = "一次性边"（不用另起定义）
+
+编译器判定：`entry.Body` 长度 == 0 才查 top-level EdgeDecl；> 0 = inline 边，跳过查。
+
+#### 3.0.6 多文件同包共享变量
+
+**同一个文件夹内的多个 .ce 文件可以使用同一个 package 名**：
+
+```
+stdio/
+├── stdio.ce       // package stdio, @Println, edge <write> io.write
+└── to_string.ce   // package stdio, @to_string
+```
+
+- 这些文件 **共享一个 SymbolTable**
+- 变量 / 节点 / 边都共享
+- **跨文件夹同名 = 错误**（避免歧义）
+
+#### 3.0.7 `:=` vs `=` 严格区分
+
+| 符号 | 语义 | 用法 | 类型来源 |
+| --- | --- | --- | --- |
+| `:=` | **类型推断**（Go 风格）| `name := expr` | 从 expr 推论 |
+| `=`  | **显式类型** | `type name = expr` | 用户写明 |
+
+**错误组合（parser 拒绝）**：
+- `type name := expr` ← 混搭，禁止
+- `name = expr` ← 无显式类型却用 `=`，禁止
+
+#### 3.0.8 类型推导 + 隐式初始化检查（roadmap #3 + #5）
+
+Mocker 节点体里的表达式经过**类型推导**和**隐式初始化检查**：
+
+**支持的类型推导**（`InferExprType`）：
+
+| 表达式 | 推导规则 |
+| --- | --- |
+| `"hello"` | `str` |
+| `42` | `num` |
+| `true`/`false` | `bool` |
+| `x` | 查 env（local var / port） |
+| `a.b` | 查 `a.b` 的类型（节点字段） |
+| `str + str` | `str` |
+| `num + num` | `num` |
+| `str + num` | **类型错误** |
+| `num -/*/% num` | `num` |
+| `x op y`（op 为 `== != < >`）| `bool` |
+| `&& \|\|` | `bool` |
+| `-x` | 需要 `num` |
+| `!x` | 需要 `bool` |
+| `func()` | `any`（MVP）|
+
+**拼接糖 msg+nl 验证**：
+
+```ce
+nl := "\n"
+data := msg + nl       // ✅ str + str = str
+data := msg + 999      // ❌ "cannot use str + num"
+```
+
+**隐式初始化检查**（`CheckNodeBody`）：
+
+每个 ident 引用都必须在使用前声明：
+
+```ce
+@Println {
+    >> str msg
+    unknown := xxx + msg   // ❌ "use of undeclared name xxx"
+    unknown >>
+}
+```
+
+支持的成员类型：
+- `VarDecl`（`name := expr` / `type name = expr`）
+- `FlowDecl`（`name >>`）
+- `FieldDecl`（`type name`）
+- `PortDecl`（`>> type name`）
+
+**检查时机**：在 `CheckAll` / `Check` 的步骤 3b（节点 body 检查阶段）跑，先 `ResolveNodeBody` 收集所有 decl，再 `CheckNodeBody` 走 expression。
+
+**对应实现**：[`internal/semantic/infer.go`](file:///home/wpp/homework/Mocker/circle/internal/semantic/infer.go)
+| `:=` | **类型推断**（Go 风格）| `name := expr` | 从 expr 推论 |
+| `=`  | **显式类型** | `type name = expr` | 用户写明 |
+
+**错误组合（parser 拒绝）**：
+- `type name := expr` ← 混搭，禁止
+- `name = expr` ← 无显式类型却用 `=`，禁止
+
+**例**：
+```ce
+msg := "hello"        // 推断 msg 是 str
+num fid = 1            // 显式 num
+data := msg + "\n"     // 推断 data 是 str（msg + str 字面量）
+```
+
+这是 Go 风格 `:=` 的扩展：类型推断 vs 显式声明分两个符号，互不通用。
 
 ### 3.1 节点（Node）
 

@@ -13,6 +13,12 @@ import (
 //   - "main" 是保留字，永远是 FuncDecl（无参数 + { body }）
 func (p *Parser) parseTopDecl() ast.Decl {
 	pos := p.peek().Pos
+
+	// Style 2 语法糖：<edge_name> { body } —— 编译器从 body 推导 src/dst
+	if p.isEdgeDeclSugarSig() {
+		return p.parseEdgeDeclSugar(pos)
+	}
+
 	name := p.consume(mocker_lex.TypeID).Value
 
 	// main 是语言保留字，永远是 FuncDecl
@@ -39,6 +45,65 @@ func (p *Parser) parseTopDecl() ast.Decl {
 		p.errorf("expected '{', '<' or '(' after top-level IDENT %q, got %s",
 			name, p.peek().Type)
 		return nil
+	}
+}
+
+// isEdgeDeclSugarSig 检查 Style 2 语法糖：<edge_name> { body }
+//
+// 形式：< IDENT/EDGE_NAME/CALL > { （无 src/dst）
+func (p *Parser) isEdgeDeclSugarSig() bool {
+	if p.peek().Type != mocker_lex.TypeOP_LT {
+		return false
+	}
+	// < edge_name
+	n1 := p.peekN(1).Type
+	if n1 != mocker_lex.TypeEDGE_NAME && n1 != mocker_lex.TypeID && n1 != mocker_lex.TypeCALL {
+		return false
+	}
+	// edge_name >
+	if p.peekN(2).Type != mocker_lex.TypeOP_GT {
+		return false
+	}
+	// > {
+	if p.peekN(3).Type != mocker_lex.TypeSEP_LBRACE {
+		return false
+	}
+	return true
+}
+
+// parseEdgeDeclSugar Style 2 语法糖：<edge_name> { body }
+//
+// 例：
+//
+//	<write> {
+//	    Println.fid >> io.write.fid
+//	    Println.data >> io.write.data
+//	}
+//
+// Src 和 Dst 暂时为空，由 semantic 层的 InferEdgeEndpoints 从 body 推导
+func (p *Parser) parseEdgeDeclSugar(pos ast.Pos) *ast.EdgeDecl {
+	p.consume(mocker_lex.TypeOP_LT)
+
+	var edge string
+	switch p.peek().Type {
+	case mocker_lex.TypeEDGE_NAME, mocker_lex.TypeID, mocker_lex.TypeCALL:
+		edge = p.consume(p.peek().Type).Value
+	default:
+		p.errorf("expected edge name, got %s", p.peek().Type)
+		return nil
+	}
+	p.consume(mocker_lex.TypeOP_GT)
+	p.consume(mocker_lex.TypeSEP_LBRACE)
+
+	body := p.parseStmts()
+	p.consume(mocker_lex.TypeSEP_RBRACE)
+
+	return &ast.EdgeDecl{
+		PosBase: ast.PosBase{P: pos},
+		Src:     "", // 由 InferEdgeEndpoints 推导
+		Edge:    edge,
+		Dst:     "", // 由 InferEdgeEndpoints 推导
+		Body:    body,
 	}
 }
 
@@ -138,30 +203,35 @@ func (p *Parser) parseStructBody(pos ast.Pos, name string, exported bool, kind a
 	}
 }
 
-// parseStructMember 4 种合法形式：
-//  0. >> str hey        → PortDecl
-//  1. str Domain        → FieldDecl（typed）
-//  2. h := "hi"         → VarDecl
-//  3. h / h >> / h>>msg → FlowDecl
+// parseStructMember 5 种合法形式：
+//  0. >> str hey        → PortDecl (入度)
+//  1. str Domain        → FieldDecl（typed，无 init）
+//     1.5 str name = expr  → VarDecl 显式类型（用 = 号，类型已写）
+//  2. name := expr      → VarDecl 类型推断（用 := 号，类型从 expr 推）
+//  3. h / h >> / h>>msg → FlowDecl（出度，必须有名字！）
+//
+// := 和 = 语义不同（用户拍板）：
+//
+//	:= → 类型推断（不能有显式类型）
+//	=  → 显式类型（必须先写 type）
 func (p *Parser) parseStructMember() ast.StructMember {
 	pos := p.peek().Pos
 	tok := p.peek()
 
-	// 形式 0：>> 开头
+	// 形式 0：>> 开头（入度声明）
 	if tok.Type == mocker_lex.TypeOP_RRARROW {
 		return p.parsePortDecl()
 	}
 
 	// 形式 1：typed field（IDENT 是类型关键字或已知类型）
-	// 也支持 1.5：typed var decl   `str name := expr`  /  `str name = expr`
 	if isTypeStart(tok.Type) && p.isTypedFieldStart() {
 		typ := p.parseTypeRef()
 		if p.match(mocker_lex.TypeID) {
 			name := p.consume(mocker_lex.TypeID).Value
-			// 1.5：name 后面是 := 或 = → 改成 VarDecl with explicit type
-			// 此时当前 token 已经是 ASSIGN op（peek()），用 isAssignOp 直接看
-			if isAssignOp(p.peek().Type) {
-				p.consumeAssign()
+			// 形式 1.5：name 后面是 = （不用 :=） → VarDecl 显式类型
+			// 用户拍板 := = 显式类型 严格区分
+			if p.peek().Type == mocker_lex.TypeOP_ASSIGN {
+				p.consume(mocker_lex.TypeOP_ASSIGN)
 				init := p.parseExpr()
 				var flow *ast.FlowChain
 				if p.match(mocker_lex.TypeOP_RRARROW) {
@@ -174,15 +244,26 @@ func (p *Parser) parseStructMember() ast.StructMember {
 					Flow:    flow,
 				}
 			}
+			// 形式 1.6：type name >>  →  typed local + export（具名出度）
+			// 例：Response response >>  →  类型 Response 的 response 出度
+			if p.peek().Type == mocker_lex.TypeOP_RRARROW {
+				p.consume(mocker_lex.TypeOP_RRARROW)
+				flow := p.parseFlowChain()
+				return &ast.VarDecl{
+					PosBase: ast.PosBase{P: pos},
+					Name:    name,
+					Flow:    flow,
+				}
+			}
 			return &ast.FieldDecl{PosBase: ast.PosBase{P: pos}, Type: typ, Name: name}
 		}
 		// typed field 后没跟 IDENT，回退
 		return nil
 	}
 
-	// 形式 2：IDENT := EXPR  /  IDENT = EXPR
-	// := 和 = 在 parser 层等价（都是变量声明）
-	if tok.Type == mocker_lex.TypeID && p.matchAssign() {
+	// 形式 2：type-inferred VarDecl，必须用 := （不用 = ）
+	// := 类型推断，类型从 expr 推论
+	if tok.Type == mocker_lex.TypeID && p.peekN(1).Type == mocker_lex.TypeOP_DEFINE {
 		return p.parseVarDeclInStruct()
 	}
 
@@ -251,12 +332,16 @@ func (p *Parser) parsePortDecl() *ast.PortDecl {
 	}
 }
 
-// parseVarDeclInStruct 节点体里的 h := "hi"  /  h = "hi"  → VarDecl
-// := 和 = 在 parser 层等价
+// parseVarDeclInStruct 节点体里的 h := expr  → VarDecl（类型推断版）
+// 必须用 := （不用 = ，= 是显式类型专用）
 func (p *Parser) parseVarDeclInStruct() *ast.VarDecl {
 	pos := p.peek().Pos
 	name := p.consume(mocker_lex.TypeID).Value
-	p.consumeAssign()
+	// 必须是 := （不是 = ）
+	if p.peek().Type != mocker_lex.TypeOP_DEFINE {
+		p.errorf("expected ':=' for type-inferred var decl, got %s (use 'type name = expr' for explicit type)", p.peek().Type)
+	}
+	p.consume(mocker_lex.TypeOP_DEFINE)
 	init := p.parseExpr()
 
 	decl := &ast.VarDecl{
