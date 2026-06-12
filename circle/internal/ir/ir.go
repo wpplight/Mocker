@@ -116,15 +116,32 @@ type IRField struct {
 // IRBlock 一个执行 block（按入度切分）
 //
 // 设计（按用户拍板）：
-//   - 每个 block 有 a 个入度（Inputs）和 b 个出度（Outputs）
-//   - block 体（Stmts）在 codegen 时按 topology 用到的部分裁减
+//   - 每个 block 有 1+ 个入度（Inputs）和 1+ 个出度（Outputs）
+//   - 多出度语义：一个 block 内允许多个输出名（如 @Println 的 fid + data）
+//     codegen 时按 topology 用到的输出裁减（如果只连 data，可以不发 fid）
 //   - 一个 block 是 auto-exec ⟺ Inputs 为空
+//   - Flow：block 内每个 output 的 flow chain（如 `hey >> stdio.Println`）
+//     codegen 会把 Flow 编译成 wire goroutine（src.out → dst.in）
 type IRBlock struct {
-	Inputs     []string // 触发本 block 的入度名
-	Outputs    []string // 本 block 出口的出度名
-	Stmts      []IRStmt // block 体（按用户写的顺序）
-	IsAutoExec bool     // 无入度（启动即跑）
+	Inputs     []string      // 触发本 block 的入度名（每条 PortDecl 开新 block）
+	Outputs    []BlockOutput // 本 block 出口的出度名（按源代码顺序）
+	Stmts      []IRStmt      // block 体（按用户写的顺序）
+	Flow       []IRFlowOp    // block 内每个 output 的 flow chain（拼起来）
+	IsAutoExec bool          // 无入度（启动即跑）
+	IsUsed     bool          // 拓扑分析后是否被引用（codegen 裁减用）
 	Pos        ast.Pos
+}
+
+// BlockOutput 一个出度点
+//
+// StopAt 表示：到本输出之前需要执行多少条 stmt
+//   - 0 = 输出紧跟在 block 头部（无前置 stmt）
+//   - N = 需要 stmts[0..N-1] 才能算出本输出
+//
+// 用途：codegen 按 topology 选择性 emit stmt（如果只连了 output[N]，可跳过其后）
+type BlockOutput struct {
+	Name   string // 输出名
+	StopAt int    // 需要的前置 stmt 数量
 }
 
 // NodeKind 节点种类
@@ -234,17 +251,23 @@ func (k FlowOpKind) String() string {
 
 // ──── 拓扑 IR ────
 
-// IRTopology main 包的拓扑块 IR
+// IRTopology 包的拓扑块 IR
 //
-// 设计：
-//   - Edges: 启动时建哪些连线（按 (src, name, dst) 三元组）
-//   - AutoExecNodes: 无入度的节点（创建即跑）
-//   - 这两条信息决定 codegen 怎么生成 main()
+// 设计（按用户拍板）：
+//   - Edges: 拓扑里的所有边（按 (src, name, dst) 三元组，按 TYPE 名）
+//   - StartNodes: 程序启动时要主动跑的节点（**只有 main 包会有非空 StartNodes**）
+//     - 判定：节点有 auto-exec block（IRNode.AutoExec==true）且出现在拓扑里
+//     - 其他节点都是**触发**的：等待上游到达后才执行
+//   - VarInstances: instance name → type name 映射
+//     - 例：`hello happy;` → {"happy": "hello"}
+//     - 用于 codegen 时用 instance 名构造节点（如 `happy := Newhello()`）
+//   - 这两条信息决定 codegen 怎么生成代码
 type IRTopology struct {
-	Edges         []EdgeKey
-	AutoExecNodes []string
-	AllNodes      []string // 拓扑里出现过的所有节点（去重）
-	Pos           ast.Pos
+	Edges        []EdgeKey
+	StartNodes   []string          // 程序启动时要主动跑的节点（main 包专属）
+	AllNodes     []string          // 拓扑里出现过的所有节点（去重）
+	VarInstances map[string]string // instance name → type name
+	Pos          ast.Pos
 }
 
 // ──── 语句 IR ────
@@ -447,37 +470,59 @@ func (p *IRProgram) AnalyzeTopology() {
 				continue
 			}
 			if referencedOuts[edge.Src] == nil {
-				referencedOuts[edge.Src] = map[string]bool{}
-			}
-			for _, op := range edge.Flow {
-				if op.Op == FlowOpSend || op.Op == FlowOpBranchSend || op.Op == FlowOpCall {
-					referencedOuts[edge.Src][op.SrcAttr] = true
-					if referencedIns[edge.Dst] == nil {
-						referencedIns[edge.Dst] = map[string]bool{}
-					}
-					referencedIns[edge.Dst][op.DstAttr] = true
+			referencedOuts[edge.Src] = map[string]bool{}
+		}
+		for _, op := range edge.Flow {
+			if op.Op == FlowOpSend || op.Op == FlowOpBranchSend || op.Op == FlowOpCall {
+				referencedOuts[edge.Src][op.SrcAttr] = true
+				// Dst 可能是带 pkg 前缀的全名（"stdio.Println"），需要 strip 后查 nodes map
+				dstShort := stripPkg(edge.Dst)
+				if referencedIns[dstShort] == nil {
+					referencedIns[dstShort] = map[string]bool{}
 				}
+				referencedIns[dstShort][op.DstAttr] = true
 			}
+		}
 		}
 	}
 
 	// 2. 给每个节点算 UsedBlocks
+	//
+	// Block USED 判定：
+	//   - 任何 Input 被 referenced（topology 引用了输入）
+	//   - 任何 Output 被 referenced（topology 引用了输出）
+	//   - 是 auto-exec block（无输入但有输出，启动即跑）
 	for _, pkg := range p.Packages {
 		for _, node := range pkg.Nodes {
 			ins := referencedIns[node.Name]
+			outs := referencedOuts[node.Name]
 			if ins == nil {
 				ins = map[string]bool{}
 			}
+			if outs == nil {
+				outs = map[string]bool{}
+			}
 			for i, blk := range node.Blocks {
 				used := false
+				// 检查 inputs
 				for _, in := range blk.Inputs {
 					if ins[in] {
 						used = true
 						break
 					}
 				}
+				// 检查 outputs
+				if !used {
+					for _, out := range blk.Outputs {
+						if outs[out.Name] {
+							used = true
+							break
+						}
+					}
+				}
 				if used || blk.IsAutoExec {
 					node.UsedBlocks = append(node.UsedBlocks, i)
+					node.Blocks[i].IsUsed = true
 				}
 			}
 			node.AutoExec = false
@@ -490,23 +535,98 @@ func (p *IRProgram) AnalyzeTopology() {
 		}
 	}
 
-	// 3. 填 AutoExecNodes（每个包独立算）
-	for pkgName, topo := range p.AllTopologies() {
-		autoExec := map[string]bool{}
-		for _, ek := range topo.Edges {
-			autoExec[ek.Src] = false
+	// 2b. 传播 pass：used block 的 flow 目标也要 mark referenced
+	//   例：say.block[0].Flow = [stdio.Println.msg]
+	//       → referencedIns["Println"]["msg"] = true → Println.block[0] 重新 mark USED
+	//   反复迭代直到不动点
+	for {
+		changed := false
+		for _, pkg := range p.Packages {
+			for _, node := range pkg.Nodes {
+				for _, blk := range node.Blocks {
+					if !blk.IsUsed {
+						continue
+					}
+					for _, op := range blk.Flow {
+						if op.Op != FlowOpSend && op.Op != FlowOpBranchSend && op.Op != FlowOpCall {
+							continue
+						}
+						dstNode := findTargetNode(p, op.Dst, op.DstAttr)
+						if dstNode == nil {
+							continue
+						}
+						targetPorts := resolveFlowTargetPorts(dstNode, op.DstAttr)
+						for _, portName := range targetPorts {
+							if referencedIns[dstNode.Name] == nil {
+								referencedIns[dstNode.Name] = map[string]bool{}
+							}
+							if !referencedIns[dstNode.Name][portName] {
+								referencedIns[dstNode.Name][portName] = true
+								changed = true
+							}
+						}
+					}
+				}
+			}
 		}
+		if !changed {
+			break
+		}
+		// 重新 mark blocks（新一轮）
+		for _, pkg := range p.Packages {
+			for _, node := range pkg.Nodes {
+				ins := referencedIns[node.Name]
+				if ins == nil {
+					continue
+				}
+				for i, blk := range node.Blocks {
+					if blk.IsUsed {
+						continue
+					}
+					used := false
+					for _, in := range blk.Inputs {
+						if ins[in] {
+							used = true
+							break
+						}
+					}
+					if used {
+						node.UsedBlocks = append(node.UsedBlocks, i)
+						node.Blocks[i].IsUsed = true
+						changed = true
+					}
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+
+	// 3. 填 StartNodes（只有 main 包会有非空 StartNodes）
+	//
+	// 规则：拓扑里出现过的 + 有 auto-exec block（IRNode.AutoExec==true）的节点
+	//
+	// 其他节点都是"触发"的（等上游到达后才执行），不进 StartNodes。
+	for _, topo := range p.AllTopologies() {
+		seen := map[string]bool{}
 		for _, name := range topo.AllNodes {
-			if !autoExec[name] {
-				autoExec[name] = true
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+
+			// 找节点
+			node := findTargetNode(p, name, "")
+			if node == nil {
+				continue
+			}
+
+			// 只有 auto-exec block 的节点才是 StartNode
+			if node.AutoExec {
+				topo.StartNodes = append(topo.StartNodes, name)
 			}
 		}
-		for n, isAuto := range autoExec {
-			if isAuto {
-				topo.AutoExecNodes = append(topo.AutoExecNodes, n)
-			}
-		}
-		_ = pkgName
 	}
 }
 
@@ -518,4 +638,45 @@ func findEdgeInProgram(p *IRProgram, key EdgeKey) *IREdge {
 		}
 	}
 	return nil
+}
+
+// findTargetNode 跨包查节点
+//
+// op.Dst 可能是：
+//   - 包名（如 "stdio"）+ op.DstAttr = 节点名（"Println"）→ 跨包节点
+//   - 节点名（如 "Println"，op.DstAttr = "msg"）→ 同包节点
+func findTargetNode(p *IRProgram, dst, dstAttr string) *IRNode {
+	// 先试 dst 作为包名 + dstAttr 作为节点名
+	if pkg, ok := p.Packages[dst]; ok {
+		if n, ok := pkg.Nodes[dstAttr]; ok {
+			return n
+		}
+	}
+	// 再试 dst 作为节点名（本包或跨包）
+	for _, pkg := range p.Packages {
+		if n, ok := pkg.Nodes[dst]; ok {
+			return n
+		}
+	}
+	return nil
+}
+
+// resolveFlowTargetPorts 把 flow 目标解析成 input port 名列表
+//
+// 规则（按用户拍板的"调用节点"语义）：
+//   - op.DstAttr 已经是某个 input port 名 → mark 那个 port
+//   - 否则（op.DstAttr 是 node 自身名）→ mark 第一个 input port（默认调用）
+//   - 如果 dstNode 没有 input port → 返回空 list（不变）
+func resolveFlowTargetPorts(dstNode *IRNode, attrName string) []string {
+	if len(dstNode.Inputs) == 0 {
+		return nil
+	}
+	// 检查 attrName 是不是 input port
+	for _, in := range dstNode.Inputs {
+		if in.Name == attrName {
+			return []string{in.Name}
+		}
+	}
+	// attrName 不是 input port → 视为"调用节点"，用第一个 input
+	return []string{dstNode.Inputs[0].Name}
 }

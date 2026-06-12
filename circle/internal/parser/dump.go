@@ -54,13 +54,6 @@ func dumpDecl(sb *strings.Builder, d ast.Decl, depth int) {
 		}
 		indent(sb, depth)
 		sb.WriteString("}\n")
-	case *ast.TopologyDecl:
-		fmt.Fprintf(sb, "TopologyDecl pkg=%s (structure layer, %d edge refs)\n", v.Name, len(v.Edges))
-		for _, e := range v.Edges {
-			indent(sb, depth+1)
-			fmt.Fprintf(sb, "EdgeRef %s <%s> %s  // 行为层在同名 top-level EdgeDecl\n",
-				e.Src, e.Edge, e.Dst)
-		}
 	case *ast.FuncDecl:
 		exportMark := ""
 		if v.Exported {
@@ -98,6 +91,10 @@ func dumpMember(sb *strings.Builder, m ast.StructMember, depth int) {
 		}
 	case *ast.PortDecl:
 		fmt.Fprintf(sb, "PortDecl >> %s %s\n", dumpType(v.Type), v.Name)
+	case *ast.InstanceDecl:
+		fmt.Fprintf(sb, "InstanceDecl %s %s\n", v.Type, v.Name)
+	case *ast.EdgeConnDecl:
+		fmt.Fprintf(sb, "EdgeConnDecl %s <%s> %s\n", v.Src, v.Edge, v.Dst)
 	}
 }
 

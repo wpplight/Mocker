@@ -2,108 +2,105 @@ package semantic
 
 import (
 	"fmt"
+	"strings"
 
 	"circle/internal/parser/ast"
 )
 
 // ──── 拓扑块校验 ────
 //
-// 拓扑块的语义（用户拍板）：
-//   - 块名 == 当前包名（dispatcher 已确保）
-//   - body 里的每条 entry (src <edge> dst) 是对 top-level EdgeDecl 的**引用**
-//   - **必须能找到对应 EdgeDecl**（带 body 的实现）—— 否则语义无效
-//   - 反过来：top-level 定义的 EdgeDecl 如果没在拓扑块里列出，**只是警告**
-//     （未导出的内部边，私有实现，无需外部访问）
-//
-// 拓扑块在 IR 阶段是"程序启动时建哪些边"的依据，
-// 这里保证**结构和实现一致**。
+// 简化版：去掉了 TopologyDecl，main 节点 body 里的 EdgeConnDecl 由 CheckMainBody 校验。
+// 保留本文件是因为入口点（checker.go）仍需做跨包 edge 查找的辅助函数。
 
-// CheckTopology 校验拓扑块里的每条 entry 都能找到对应 EdgeDecl
+// CheckMainBody 校验 main 节点 body 里的内容
 //
-// 单包版（向后兼容）：只查本包符号表
-func CheckTopology(topo *ast.TopologyDecl, table *SymbolTable) []SemanticError {
-	return CheckTopologyCross(topo, table, nil)
-}
-
-// CheckTopologyCross 跨包版：跨包节点也能找到
-func CheckTopologyCross(topo *ast.TopologyDecl, table *SymbolTable, allTables map[string]*SymbolTable) []SemanticError {
+// 检查项：
+//   - InstanceDecl 的 type 必须存在（本地或跨包）
+//   - InstanceDecl 的 name 不重复
+//   - EdgeConnDecl 的 src/dst 都必须对应一个已声明的 instance
+//   - EdgeConnDecl 的 edge 必须能找到 top-level EdgeDecl（跨包用 CALL 表示）
+func CheckMainBody(mainNode *ast.StructDecl, table *SymbolTable, allTables map[string]*SymbolTable) []SemanticError {
 	var errs []SemanticError
-	seen := map[EdgeKey]bool{}
+	if mainNode == nil {
+		return errs
+	}
 
-	for _, entry := range topo.Edges {
-		key := EdgeKey{Src: entry.Src, Edge: entry.Edge, Dst: entry.Dst}
-
-		// 1. 同一拓扑块里不允许重复 entry
-		if seen[key] {
+	// 收集 InstanceDecl（varMap: name → type）
+	varMap := map[string]string{}
+	seen := map[string]bool{}
+	for _, m := range mainNode.Members {
+		inst, ok := m.(*ast.InstanceDecl)
+		if !ok {
+			continue
+		}
+		// 检查重复
+		if seen[inst.Name] {
 			errs = append(errs, SemanticError{
-				Pos:  entry.Pos(),
-				Msg:  fmt.Sprintf("topology %s: duplicate entry %s", topo.Name, key),
-				Hint: "remove the duplicate line",
+				Pos:  inst.Pos(),
+				Msg:  fmt.Sprintf("main: duplicate instance name %q", inst.Name),
+				Hint: "use a different instance name",
 			})
 			continue
 		}
-		seen[key] = true
+		seen[inst.Name] = true
 
-		// 2. src / dst 节点必须存在（本地或跨包）
-		if !nodeExists(entry.Src, table, allTables) {
+		// 检查 type 存在
+		if !nodeExists(inst.Type, table, allTables) {
 			errs = append(errs, SemanticError{
-				Pos:  entry.Pos(),
-				Msg:  fmt.Sprintf("topology %s: source node %q not found", topo.Name, entry.Src),
-				Hint: fmt.Sprintf("declare `@%s { ... }` in this file, or import it from another package", entry.Src),
+				Pos:  inst.Pos(),
+				Msg:  fmt.Sprintf("main: instance %q declares unknown type %q", inst.Name, inst.Type),
+				Hint: fmt.Sprintf("declare `@%s { ... }` in this file, or import it from another package", inst.Type),
 			})
+			continue
 		}
-		if !nodeExists(entry.Dst, table, allTables) {
-			errs = append(errs, SemanticError{
-				Pos:  entry.Pos(),
-				Msg:  fmt.Sprintf("topology %s: dest node %q not found", topo.Name, entry.Dst),
-				Hint: fmt.Sprintf("declare `@%s { ... }` in this file, or import it from another package", entry.Dst),
-			})
-		}
-
-		// 3. 拓扑 entry 必须能找到对应 EdgeDecl（带 body 的实现）
-		// 例外：entry 本身带 body（inline edge，一次性使用边）→ 跳过
-		// 例外：src/dst 是保留节点（SYSCALL/EXIT/ALLOC）→ 编译器内置，跳过
-		if len(entry.Body) == 0 && !IsReservedNode(entry.Dst) {
-			impl := table.GetEdge(entry.Src, entry.Edge, entry.Dst)
-			if impl == nil {
-				errs = append(errs, SemanticError{
-					Pos:  entry.Pos(),
-					Msg:  fmt.Sprintf("topology %s: entry %s has no matching edge declaration (with body)", topo.Name, key),
-					Hint: fmt.Sprintf("add `%s { body }` at top level (defines what flows inside the edge)", key),
-				})
-				continue
-			}
-		}
-
-		// 4. EdgeDecl 必须是 exported 的（如果跨包用）
-		//    MVP 暂不强制：单文件下都 OK
+		varMap[inst.Name] = inst.Type
 	}
+
+	// 校验 EdgeConnDecl
+	for _, m := range mainNode.Members {
+		conn, ok := m.(*ast.EdgeConnDecl)
+		if !ok {
+			continue
+		}
+		// src/dst 必须先声明
+		if _, ok := varMap[conn.Src]; !ok {
+			errs = append(errs, SemanticError{
+				Pos:  conn.Pos(),
+				Msg:  fmt.Sprintf("main: edge src instance %q not declared", conn.Src),
+				Hint: fmt.Sprintf("add `var %s <type>;` before this edge", conn.Src),
+			})
+		}
+		if _, ok := varMap[conn.Dst]; !ok {
+			errs = append(errs, SemanticError{
+				Pos:  conn.Pos(),
+				Msg:  fmt.Sprintf("main: edge dst instance %q not declared", conn.Dst),
+				Hint: fmt.Sprintf("add `var %s <type>;` before this edge", conn.Dst),
+			})
+		}
+
+		// edge 必须在符号表里有对应 EdgeDecl（带 body）
+		// 因为 var name 是局部的，这里用 src/dst 的 type 来查找
+		srcType := varMap[conn.Src]
+		dstType := varMap[conn.Dst]
+		if srcType == "" || dstType == "" {
+			continue
+		}
+		impl := table.GetEdge(srcType, conn.Edge, dstType)
+		if impl == nil {
+			errs = append(errs, SemanticError{
+				Pos:  conn.Pos(),
+				Msg:  fmt.Sprintf("main: edge %s <%s> %s has no matching edge declaration (with body)", srcType, conn.Edge, dstType),
+				Hint: fmt.Sprintf("add `%s <%s> %s { body }` at top level", srcType, conn.Edge, dstType),
+			})
+		}
+	}
+
 	return errs
 }
 
-// nodeExists 节点存在性检查（本地或跨包）
+// IsReservedNode 判断是不是编译器内置保留节点
 //
-// SYSCALL / EXIT / ALLOC 等是编译器内置保留节点（保留字），
-// 不在 .ce 文件里，但语义层要认。
-func nodeExists(name string, localTable *SymbolTable, allTables map[string]*SymbolTable) bool {
-	if localTable.GetNode(name) != nil {
-		return true
-	}
-	if IsReservedNode(name) {
-		return true
-	}
-	if allTables == nil {
-		return false
-	}
-	if _, pkg := crossLookupNode(name, localTable, allTables); pkg != "" {
-		return true
-	}
-	return false
-}
-
-// IsReservedNode 检查是否是编译器内置保留节点
-//
-// SYSCALL 等保留字不需要在 .ce 文件里声明，编译器自带 emit 模板。
+//   - SYSCALL / EXIT / ALLOC 等保留字出现在 edge Dst 时不需要 body
 func IsReservedNode(name string) bool {
 	switch name {
 	case "SYSCALL", "EXIT", "ALLOC":
@@ -112,24 +109,46 @@ func IsReservedNode(name string) bool {
 	return false
 }
 
-// CheckEdgesForTopology 检查 top-level 定义的 EdgeDecl 哪些没出现在拓扑块里
+// nodeExists 节点是否存在（本地 + 跨包）
 //
-// 用途：在语义分析结束时，输出"未导出的内部边"警告
-//
-// MVP：只数，不报（让上层决定要不要 warn）
-func CheckEdgesForTopology(topo *ast.TopologyDecl, table *SymbolTable) []EdgeKey {
-	var orphans []EdgeKey
-	for key := range table.Edges {
-		found := false
-		for _, entry := range topo.Edges {
-			if entry.Src == key.Src && entry.Edge == key.Edge && entry.Dst == key.Dst {
-				found = true
-				break
+// 支持两种 name 形式：
+//   - 短名："hello" → 在本包 + 所有跨包表里查
+//   - 全名："stdio.Println" → 拆 pkg + node，分别在跨包表里查
+func nodeExists(name string, local *SymbolTable, all map[string]*SymbolTable) bool {
+	// 短名：直接查
+	if local != nil && local.GetNode(name) != nil {
+		return true
+	}
+
+	// 跨包查找（短名：尝试每个 pkg）
+	if all != nil {
+		for pkgName, t := range all {
+			if t.GetNode(name) != nil {
+				return true
+			}
+			// 全名形式：尝试 pkgName + "." + name（针对不带 pkg 的输入）
+			if t.GetNode(pkgName+"."+name) != nil {
+				return true
 			}
 		}
-		if !found {
-			orphans = append(orphans, key)
+	}
+
+	// 全名形式："stdio.Println" → 拆 pkg + node
+	if idx := strings.LastIndex(name, "."); idx > 0 {
+		pkg := name[:idx]
+		nodeName := name[idx+1:]
+		if all != nil {
+			if t, ok := all[pkg]; ok {
+				if t.GetNode(nodeName) != nil {
+					return true
+				}
+			}
+		}
+		// 本地表也试一遍（以防 pkgName 误填）
+		if local != nil && local.GetNode(nodeName) != nil {
+			return true
 		}
 	}
-	return orphans
+
+	return false
 }

@@ -102,8 +102,7 @@ func ResolveFile(file *ast.File) (*SymbolTable, []SemanticError) {
 			}
 		case *ast.EdgeDecl:
 			table.addEdge(d)
-		case *ast.TopologyDecl:
-			// 拓扑块本身不加入符号表，单独由 checkTopology 校验
+			// 简化：没有 TopologyDecl，main body 由 CheckMainBody 单独校验
 		}
 	}
 
@@ -210,16 +209,18 @@ func (t *SymbolTable) HasOutput(nodeName, outputName string) bool {
 //   - 某个 block 的出度（Output，name >> 声明）→ 读 block 计算出的值
 //
 // 两者任一命中即合法。
+//
+// 顺序：先查 output 再查 input（passthrough 同名时视为 output，可当 src 读）
 func (t *SymbolTable) GetExport(nodeName, attrName string) (in *InputSymbol, isOutput bool, found bool) {
 	ns := t.Nodes[nodeName]
 	if ns == nil {
 		return nil, false, false
 	}
-	if p := t.GetInput(nodeName, attrName); p != nil {
-		return p, false, true
-	}
 	if t.HasOutput(nodeName, attrName) {
 		return nil, true, true
+	}
+	if p := t.GetInput(nodeName, attrName); p != nil {
+		return p, false, true
 	}
 	return nil, false, false
 }

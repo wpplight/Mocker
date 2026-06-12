@@ -23,16 +23,11 @@ import io
     nl := "\n"
     num fid = 1            // 显式类型变量：= 号
     fid >>
-    data := msg + nl       // 类型推断：:= 号，data 是 str（推断自 msg+nl）
-    data >>                // 显式出度：data（= msg+"\n"）
+    data >>
 }
 
-// Style 2 语法糖：<write> { body } —— src/dst 由编译器从 body 推导
-<write> {
-    Println.fid>>io.write.fid
-    Println.data>>io.write.data
-}
-
-stdio{
-    Println <write> io.write
+// Println <write> io.write 边：让 Println 通过 <write> 边连到 io.write
+Println <write> io.write {
+    Println.fid >> io.write.fid
+    Println.data >> io.write.data
 }

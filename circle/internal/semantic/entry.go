@@ -10,9 +10,9 @@ import (
 //
 // 设计（用户拍板）：
 //   - package main 才是入口（库包无入口）
-//   - 入口的启动序列 = `main { ... }` 拓扑块
-//   - 拓扑块里所有"无入度节点"创建时**自动执行**（auto-exec）
-//     （前面定下的："有些节点一开始没有入度，就不会等待边调用，
+//   - 入口的启动序列 = `main { ... }` 节点 body 里的 InstanceDecl + EdgeConnDecl
+//   - main 节点 body 里的所有"无入度实例"创建时**自动执行**（auto-exec）
+//     （"有些节点一开始没有入度，就不会等待边调用，
 //      而是在节点创建的时候执行，比如 hello 节点"）
 //   - 有入度的节点等数据流入再触发
 //
@@ -23,17 +23,33 @@ import (
 
 // EntryPoint 入口点信息
 type EntryPoint struct {
-	File        *ast.File         // package main 那个文件
-	Topology    *ast.TopologyDecl // main { ... } 拓扑块
-	AutoExec    []string          // 无入度节点名（启动时自动执行）
-	AllNodes    []string          // 拓扑里出现过的所有节点
-	AsyncEdges  []EdgeKey         // 异步边（body 含 fan-out）
-	SyncEdges   []EdgeKey         // 同步边
+	File        *ast.File     // package main 那个文件
+	MainNode    *ast.StructDecl // main { ... } 节点
+	VarInstances map[string]string // instance name → type name（从 InstanceDecl 收集）
+	Edges       []EdgeConnDeclInfo // main 节点 body 里的 EdgeConnDecl
+	AutoExec    []string      // 无入度实例名（启动时自动执行）
+	AllNodes    []string      // main 里出现过的所有实例
+	AsyncEdges  []EdgeKey     // 异步边（body 含 fan-out）
+	SyncEdges   []EdgeKey     // 同步边
+}
+
+// EdgeConnDeclInfo 边的运行时表示
+//
+//   - Src / Dst：实例名（不是 type 名）
+//   - SrcType / DstType：从 VarInstances 解析出的 type 名
+//   - Body：从 top-level EdgeDecl 找来的（带 body 才有）
+type EdgeConnDeclInfo struct {
+	Src      string // instance name
+	Edge     string
+	Dst      string // instance name
+	SrcType  string // type name
+	DstType  string // type name
+	HasBody  bool   // 是否找到 top-level EdgeDecl（含 body）
 }
 
 // FindEntryPoint 找一个 AST 文件里的入口点
 //
-// 返回 nil 表示该文件不是入口包（没 package main 或没 main 拓扑）
+// 返回 nil 表示该文件不是入口包（没 package main 或没 main 节点）
 func FindEntryPoint(file *ast.File) *EntryPoint {
 	if file == nil || file.Pkg == nil {
 		return nil
@@ -42,37 +58,51 @@ func FindEntryPoint(file *ast.File) *EntryPoint {
 		return nil
 	}
 
-	// 找 `main { ... }` 拓扑块
-	var mainTopo *ast.TopologyDecl
+	// 找 `main { ... }` 节点
+	var mainNode *ast.StructDecl
 	for _, decl := range file.Decls {
-		if t, ok := decl.(*ast.TopologyDecl); ok {
-			mainTopo = t
+		if s, ok := decl.(*ast.StructDecl); ok && s.Name == "main" {
+			mainNode = s
 			break
 		}
 	}
-	if mainTopo == nil {
+	if mainNode == nil {
 		return nil
 	}
 
 	ep := &EntryPoint{
-		File:     file,
-		Topology: mainTopo,
+		File:         file,
+		MainNode:     mainNode,
+		VarInstances: map[string]string{},
 	}
 
-	// 收集所有节点
-	indeg := map[string]int{} // 顺便算 indegree
-	for _, e := range mainTopo.Edges {
-		ep.AllNodes = appendUnique(ep.AllNodes, e.Src)
-		ep.AllNodes = appendUnique(ep.AllNodes, e.Dst)
-		indeg[e.Dst]++
+	// 收集 InstanceDecl + EdgeConnDecl
+	indeg := map[string]int{}
+	for _, m := range mainNode.Members {
+		switch v := m.(type) {
+		case *ast.InstanceDecl:
+			ep.VarInstances[v.Name] = v.Type
+			ep.AllNodes = appendUnique(ep.AllNodes, v.Name)
+		case *ast.EdgeConnDecl:
+			info := EdgeConnDeclInfo{
+				Src:  v.Src,
+				Edge: v.Edge,
+				Dst:  v.Dst,
+			}
+			if t, ok := ep.VarInstances[v.Src]; ok {
+				info.SrcType = t
+			}
+			if t, ok := ep.VarInstances[v.Dst]; ok {
+				info.DstType = t
+			}
+			ep.Edges = append(ep.Edges, info)
+			ep.AllNodes = appendUnique(ep.AllNodes, v.Src)
+			ep.AllNodes = appendUnique(ep.AllNodes, v.Dst)
+			indeg[v.Dst]++
 
-		// 分类 sync / async
-		impl := EdgeKey{Src: e.Src, Edge: e.Edge, Dst: e.Dst}
-		// 我们手头没有 EdgeDecl（topo entry 没有 body），
-		// 但 MVP 阶段我们从 ResolveFile 拿到的符号表里能找到
-		// 这里先按名称标记，到 IR 阶段再做精确判断
-		// TODO: 把 table 也传进来
-		ep.SyncEdges = append(ep.SyncEdges, impl) // 默认 sync
+			key := EdgeKey{Src: info.SrcType, Edge: v.Edge, Dst: info.DstType}
+			ep.SyncEdges = append(ep.SyncEdges, key) // 默认 sync，后面 AnnotateEntryPoint 修正
+		}
 	}
 
 	// indegree=0 → auto-exec
@@ -94,13 +124,14 @@ func AnnotateEntryPoint(ep *EntryPoint, table *SymbolTable) {
 	}
 	ep.AsyncEdges = nil
 	ep.SyncEdges = nil
-	for _, e := range ep.Topology.Edges {
-		key := EdgeKey{Src: e.Src, Edge: e.Edge, Dst: e.Dst}
-		impl := table.GetEdge(e.Src, e.Edge, e.Dst)
+	for _, e := range ep.Edges {
+		key := EdgeKey{Src: e.SrcType, Edge: e.Edge, Dst: e.DstType}
+		impl := table.GetEdge(e.SrcType, e.Edge, e.DstType)
 		if impl == nil {
-			// 之前应该已经报错过，这里跳过
+			// 没找到 body（可能是 cross-pkg 边），跳过
 			continue
 		}
+		e.HasBody = true
 		if ClassifyEdge(impl) == EdgeAsync {
 			ep.AsyncEdges = append(ep.AsyncEdges, key)
 		} else {
@@ -126,8 +157,9 @@ func FormatEntryPoint(ep *EntryPoint) string {
 		return "no entry point"
 	}
 	s := fmt.Sprintf("EntryPoint: package %s, %d nodes, %d edges, %d auto-exec\n",
-		ep.File.Pkg.Name, len(ep.AllNodes), len(ep.Topology.Edges), len(ep.AutoExec))
-	s += fmt.Sprintf("  all nodes: %v\n", ep.AllNodes)
+		ep.File.Pkg.Name, len(ep.AllNodes), len(ep.Edges), len(ep.AutoExec))
+	s += fmt.Sprintf("  var instances: %v\n", ep.VarInstances)
+	s += fmt.Sprintf("  all instances: %v\n", ep.AllNodes)
 	s += fmt.Sprintf("  auto-exec: %v\n", ep.AutoExec)
 	s += fmt.Sprintf("  sync edges (%d): %v\n", len(ep.SyncEdges), ep.SyncEdges)
 	s += fmt.Sprintf("  async edges (%d, spawn goroutines): %v\n", len(ep.AsyncEdges), ep.AsyncEdges)

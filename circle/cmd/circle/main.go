@@ -86,14 +86,41 @@ func runIR() {
 	}
 }
 
-// runHello 跑 hello world MVP（Task A）
+// runHello 跑 hello world（M4.2 通用 codegen）
 //
 // 用法：circle run
-// - 工作区扫到 main → 用 MVP codegen emit Go 源码 → 编译 → 运行
-// - 当前只支持 example/main.ce 这个 hello world（硬编码模板）
-// - 升级到 M4.2 后会用通用 IR → go/ast
+// - 工作区扫到 main → IR Lower → EmitGoFromIR 通用 emit → 编译 → 运行
+// - 不再依赖硬编码模板（MVP 模板保留在 codegen.EmitHelloWorldGo 作 fallback）
 func runHello() {
-	srcCode := codegen.EmitHelloWorldGo()
+	// 1. 扫 workspace + BFS 加载
+	pkgMap, scanErrs := semantic.ScanWorkspace(semantic.ScanOptions{Root: "."})
+	for _, e := range scanErrs {
+		fmt.Fprintf(os.Stderr, "%s\n", e)
+	}
+	mainInfo, err := semantic.FindMainPackage(pkgMap)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "workspace error: %v\n", err)
+		os.Exit(1)
+	}
+	files, bfsErrs := semantic.LoadWorkspaceBFS(mainInfo.Name, pkgMap)
+	for _, e := range bfsErrs {
+		fmt.Fprintf(os.Stderr, "%s\n", e)
+	}
+
+	// 2. 跑 semantic
+	wresult := semantic.CheckAll(files)
+	for _, e := range wresult.Errors {
+		fmt.Fprintf(os.Stderr, "%s\n", e)
+	}
+	if len(wresult.Errors) > 0 {
+		os.Exit(1)
+	}
+
+	// 3. IR Lower
+	prog := ir.Lower(wresult)
+
+	// 4. 通用 codegen emit
+	srcCode := codegen.EmitGoFromIR(prog)
 
 	// Sanity check
 	if errs := codegen.ValidationCheck(srcCode); len(errs) > 0 {
@@ -103,10 +130,10 @@ func runHello() {
 
 	// debug 输出（run 模式：emit 出的 Go 源码也写一份）
 	if debugOn {
-		dbg.Add("00-emit-go.txt", srcCode)
+		dbg.Add("00-emit-go.go", srcCode)
 	}
 
-	fmt.Println("=== emit Go 源码 ===")
+	fmt.Println("=== emit Go 源码 (IR-driven) ===")
 	fmt.Println(srcCode)
 	fmt.Println("=== 编译 + 跑 ===")
 
@@ -154,6 +181,9 @@ func dumpWorkspaceDebug(files map[string]*ast.File, wresult *semantic.WorkspaceR
 
 	// IR
 	dbg.Add("03-ir.txt", ir.DumpProgram(prog))
+	// 构建图（语义层）并 dump 到 04-graph.txt
+	g := ir.BuildGraph(prog)
+	dbg.Add("04-graph.txt", g.Dump())
 }
 
 // dumpSingleFileDebug 把单文件模式的 AST + semantic 写到 dbg
@@ -199,6 +229,7 @@ func main() {
 	debugDir = *debugDirArg
 	if debugOn {
 		dbg = circledebug.New(debugDir)
+		fmt.Fprintf(os.Stderr, "[debug] enabled, dir=%s\n", debugDir)
 		defer func() {
 			if err := dbg.Flush(); err != nil {
 				fmt.Fprintf(os.Stderr, "debug flush error: %v\n", err)
@@ -366,6 +397,13 @@ func readSource(path string) ([]byte, error) {
 		return io.ReadAll(os.Stdin)
 	}
 	return os.ReadFile(path)
+}
+
+func countFiles(d *circledebug.Dumper) int {
+	if d == nil {
+		return 0
+	}
+	return len(d.Files)
 }
 
 func usage() {

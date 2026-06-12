@@ -30,7 +30,7 @@ type WorkspaceResult struct {
 // 流程：
 //  1. 先对所有 EdgeDecl 跑 InferEdgeEndpoints（Style 2 语法糖：填 src/dst）
 //  2. 建符号表（这时 edge 已有正确的 src/dst）
-//  3. 跑 edge body 类型检查 + topology 检查
+//  3. 跑 edge body 类型检查 + main body 检查
 func Check(file *ast.File) *CheckResult {
 	result := &CheckResult{
 		File:      file,
@@ -49,7 +49,7 @@ func Check(file *ast.File) *CheckResult {
 	result.Table = table
 	result.Errors = append(result.Errors, errs...)
 
-	// 步骤 3：跑 edge body + topology
+	// 步骤 3：跑 edge body 类型检查
 	for _, decl := range file.Decls {
 		if e, ok := decl.(*ast.EdgeDecl); ok {
 			result.Errors = append(result.Errors, CheckEdgeBody(e, table)...)
@@ -58,24 +58,21 @@ func Check(file *ast.File) *CheckResult {
 		}
 	}
 
-	for _, decl := range file.Decls {
-		if t, ok := decl.(*ast.TopologyDecl); ok {
-			result.Errors = append(result.Errors, CheckTopology(t, table)...)
-		}
-	}
-
-	// 步骤 3b：节点 body 类型推导 + 隐式初始化检查（解决 #3 + #5）
+	// 步骤 3b：节点 body 类型推导 + 隐式初始化检查
+	// main 节点是特殊的（InstanceDecl + EdgeConnDecl），跳过 CheckNodeBody
 	for _, decl := range file.Decls {
 		if s, ok := decl.(*ast.StructDecl); ok {
-			if s.Kind == ast.StructKindNode {
+			if s.Kind == ast.StructKindNode && s.Name != "main" {
 				env := ResolveNodeBody(s.Name, s.Members)
 				result.Errors = append(result.Errors, CheckNodeBody(s.Name, s.Members, env)...)
 			}
 		}
 	}
 
+	// 步骤 3c：main body 检查（如果是 main 包）
 	result.EntryPoint = FindEntryPoint(file)
 	if result.EntryPoint != nil {
+		result.Errors = append(result.Errors, CheckMainBody(result.EntryPoint.MainNode, table, nil)...)
 		AnnotateEntryPoint(result.EntryPoint, table)
 	}
 
@@ -125,15 +122,8 @@ func CheckAll(files map[string]*ast.File) *WorkspaceResult {
 		}
 
 		for _, decl := range file.Decls {
-			if t, ok := decl.(*ast.TopologyDecl); ok {
-				result.Errors = append(result.Errors, CheckTopologyCross(t, localTable, result.Tables)...)
-			}
-		}
-
-		// 步骤 3b：节点 body 类型推导 + 隐式初始化检查（解决 #3 + #5）
-		for _, decl := range file.Decls {
 			if s, ok := decl.(*ast.StructDecl); ok {
-				if s.Kind == ast.StructKindNode {
+				if s.Kind == ast.StructKindNode && s.Name != "main" {
 					env := ResolveNodeBody(s.Name, s.Members)
 					result.Errors = append(result.Errors, CheckNodeBody(s.Name, s.Members, env)...)
 				}
@@ -141,11 +131,14 @@ func CheckAll(files map[string]*ast.File) *WorkspaceResult {
 		}
 	}
 
-	// 步骤 4：入口点
+	// 步骤 4：入口点（main body 校验）
 	if mainFile, ok := files["main"]; ok {
 		result.EntryPoint = FindEntryPoint(mainFile)
-		if result.EntryPoint != nil && result.Tables["main"] != nil {
-			AnnotateEntryPoint(result.EntryPoint, result.Tables["main"])
+		if result.EntryPoint != nil {
+			if mainTable, ok := result.Tables["main"]; ok {
+				result.Errors = append(result.Errors, CheckMainBody(result.EntryPoint.MainNode, mainTable, result.Tables)...)
+				AnnotateEntryPoint(result.EntryPoint, mainTable)
+			}
 		}
 	}
 

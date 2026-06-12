@@ -21,9 +21,12 @@ func (p *Parser) parseTopDecl() ast.Decl {
 
 	name := p.consume(mocker_lex.TypeID).Value
 
-	// main 是语言保留字，永远是 FuncDecl
+	// main 是语言保留字：当 NodeDecl 解析（简化版的特殊节点）
+	// main { ... } body 包含 InstanceDecl + EdgeConnDecl，由 IR 层 lowerMainTopology 处理
 	if name == "main" {
-		return p.parseFuncDecl("main", false, false)
+		pos := p.peek().Pos // { 的位置
+		_ = pos
+		return p.parseStructBody(p.peek().Pos, "main", false, ast.StructKindNode)
 	}
 
 	switch p.peek().Type {
@@ -223,6 +226,25 @@ func (p *Parser) parseStructMember() ast.StructMember {
 		return p.parsePortDecl()
 	}
 
+	// 形式 4 + 5（main 节点专用）：InstanceDecl / EdgeConnDecl
+	// 必须在 typed field 检查之前！否则 `hello happy` 会被当成 FieldDecl
+	if tok.Type == mocker_lex.TypeID {
+		// 子形式 5：`src <edge> dst` → EdgeConnDecl
+		if p.peekN(1).Type == mocker_lex.TypeOP_LT {
+			return p.parseEdgeConnDecl()
+		}
+		// 子形式 4：`typeName varName` → InstanceDecl（peekN(1) 是 IDENT 或 CALL）
+		if p.peekN(1).Type == mocker_lex.TypeID {
+			return p.parseInstanceDecl()
+		}
+	}
+	// CALL 形式：`pkg.Node varName` → InstanceDecl（跨包）
+	if tok.Type == mocker_lex.TypeCALL {
+		if p.peekN(1).Type == mocker_lex.TypeID {
+			return p.parseInstanceDecl()
+		}
+	}
+
 	// 形式 1：typed field（IDENT 是类型关键字或已知类型）
 	if isTypeStart(tok.Type) && p.isTypedFieldStart() {
 		typ := p.parseTypeRef()
@@ -276,12 +298,85 @@ func (p *Parser) parseStructMember() ast.StructMember {
 
 	// 形式 3：IDENT（裸字段，可带 >> 链）
 	if tok.Type == mocker_lex.TypeID {
+		// 子形式 5（main 节点专用）：EdgeConnDecl `src <edge> dst`
+		// peekN(1) 必须是 < （OP_LT），且 peekN(3) 必须是 IDENT/CALL（dst）
+		if p.peekN(1).Type == mocker_lex.TypeOP_LT {
+			return p.parseEdgeConnDecl()
+		}
+		// 子形式 4（main 节点专用）：InstanceDecl `typeName varName`
+		// peekN(1) 必须是 IDENT（var name）
+		if p.peekN(1).Type == mocker_lex.TypeID {
+			return p.parseInstanceDecl()
+		}
 		return p.parseFlowDecl()
 	}
+
+	// 形式 4 跨包：InstanceDecl `pkg.Node varName`
+	// 注：理论上 CALL 形式应该在 IDENT 分支处理（CALL 也是以 IDENT 开头）
+	// 上面 check `tok.Type == TypeCALL` 后下面也会到这里
+	if tok.Type == mocker_lex.TypeCALL {
+		// 形式 4 跨包：`stdio.Println p` → InstanceDecl
+		if p.peekN(1).Type == mocker_lex.TypeID {
+			return p.parseInstanceDecl()
+		}
+	}
+
+	// 形式 4 + 5（main 节点专用）：InstanceDecl / EdgeConnDecl
+	// 我们在 parseStructMember 末尾已经检查过，这里兜底（实际上不会到这里）
 
 	p.errorf("unexpected token %s in struct body", tok.Type)
 	p.pos++
 	return nil
+}
+
+// parseInstanceDecl 解析 `typeName varName;`（main 节点专用）
+//
+// 例：`hello happy;`         → 用 @hello 类型声明 happy 实例
+//
+//	`stdio.Println p;`     → 用 stdio.Println 类型声明 p 实例
+//
+// ; 可选（用户友好）
+func (p *Parser) parseInstanceDecl() ast.StructMember {
+	pos := p.peek().Pos
+	typeName := p.consume(p.peek().Type).Value // IDENT 或 CALL
+	varName := p.consume(mocker_lex.TypeID).Value
+	if p.match(mocker_lex.TypeSEP_SEMI) {
+		p.consume(mocker_lex.TypeSEP_SEMI)
+	}
+	return &ast.InstanceDecl{
+		PosBase: ast.PosBase{P: pos},
+		Type:    typeName,
+		Name:    varName,
+	}
+}
+
+// parseEdgeConnDecl 解析 `src <edge> dst`（main 节点专用）
+//
+// 例：`happy <out> p`         → 在 happy 和 p 之间建 <out> 边
+//
+// edge name 可以是 EDGE_NAME（含 - 的 out-no-co）或 IDENT（普通的 out）
+func (p *Parser) parseEdgeConnDecl() ast.StructMember {
+	pos := p.peek().Pos
+	srcName := p.consume(mocker_lex.TypeID).Value
+	p.consume(mocker_lex.TypeOP_LT)
+	// edge name: EDGE_NAME（含 -）或 IDENT（普通的 out）
+	var edgeName string
+	switch p.peek().Type {
+	case mocker_lex.TypeEDGE_NAME, mocker_lex.TypeID:
+		edgeName = p.consume(p.peek().Type).Value
+	default:
+		p.errorf("expected edge name, got %s", p.peek().Type)
+		p.pos++
+		return nil
+	}
+	p.consume(mocker_lex.TypeOP_GT)
+	dstName := p.consume(mocker_lex.TypeID).Value
+	return &ast.EdgeConnDecl{
+		PosBase: ast.PosBase{P: pos},
+		Src:     srcName,
+		Edge:    edgeName,
+		Dst:     dstName,
+	}
 }
 
 // skipTrivial 跳过 SEMI / 空行 等

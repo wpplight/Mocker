@@ -24,11 +24,9 @@ hello <out-no-co> say {
 
 // 边 hello <out> say：fan-out，同一份 hello.h 并发送入 hay / my / world 三个端口
 // （每条分支在编译器里是一段独立 goroutine）
-hello <out> say {
-    hello.h >>
-    >>say.hey
-    >>say.my
-    >>say.world
+<out> {
+    hello.h >> stdio.Println.msg
+  
 }
 
 // 节点 say：3 个入度端口，每个端口触发一次 stdio.Println
@@ -40,7 +38,7 @@ say {
     >> str my
         my >> stdio.Println
 
-    // 参数数量和另一边接收数量相同时可以直接传输，名称匹配也行
+    // 语法糖，参数数量和另一边接收数量相同时可以直接传输，名称匹配也行
     >> str world
         world >> stdio.Println
 }
@@ -63,5 +61,7 @@ say {
 //      hello 创建（auto-exec）→ h 流出 → 沿 <out> 到 say
 //      → 触发 say.hay/my/world 三个 port → 各自走 stdio.Println
 main {
-    hello <out> say
+    hello happy;
+    stdio.Println p
+    happy <out> p
 }

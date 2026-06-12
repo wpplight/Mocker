@@ -58,7 +58,26 @@ func DumpNode(name string, n *IRNode) string {
 		sb.WriteString(fmt.Sprintf("      init: %v\n", s))
 	}
 	for i, b := range n.Blocks {
-		sb.WriteString(fmt.Sprintf("      block[%d] in=%v out=%v auto=%v\n", i, b.Inputs, b.Outputs, b.IsAutoExec))
+		usedMark := "[USED]"
+		if !b.IsUsed {
+			usedMark = "[pruned]"
+		}
+		// 把 BlockOutput 拍平成 readable 形式
+		var outDescs []string
+		for _, o := range b.Outputs {
+			outDescs = append(outDescs, fmt.Sprintf("%s@%d", o.Name, o.StopAt))
+		}
+		outStr := strings.Join(outDescs, ",")
+		if outStr == "" {
+			outStr = "∅"
+		}
+		sb.WriteString(fmt.Sprintf("      block[%d] in=%v out=[%s] auto=%v %s\n", i, b.Inputs, outStr, b.IsAutoExec, usedMark))
+		for j, s := range b.Stmts {
+			sb.WriteString(fmt.Sprintf("        stmt[%d]: %v\n", j, s))
+		}
+		for j, op := range b.Flow {
+			sb.WriteString(fmt.Sprintf("        flow[%d]: %s\n", j, dumpFlowOp(op)))
+		}
 	}
 	return sb.String()
 }
@@ -69,8 +88,8 @@ func DumpTopology(t *IRTopology) string {
 	for _, ek := range t.Edges {
 		sb.WriteString(fmt.Sprintf("      %s <%s> %s\n", ek.Src, ek.Name, ek.Dst))
 	}
-	if len(t.AutoExecNodes) > 0 {
-		sb.WriteString(fmt.Sprintf("    AutoExec: %v\n", t.AutoExecNodes))
+	if len(t.StartNodes) > 0 {
+		sb.WriteString(fmt.Sprintf("    StartNodes: %v\n", t.StartNodes))
 	}
 	if len(t.AllNodes) > 0 {
 		sb.WriteString(fmt.Sprintf("    AllNodes: %v\n", t.AllNodes))

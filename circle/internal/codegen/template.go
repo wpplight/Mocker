@@ -135,6 +135,9 @@ func FormatGoCode(raw string) string {
 }
 
 // ValidationCheck 简单的 sanity check（确保 emit 出的是合法 Go 源码骨架）
+//
+// 只检查骨架：package decl + import + func main
+// 不检查具体内容（由运行时验证）
 func ValidationCheck(goCode string) []string {
 	var errs []string
 	checks := []struct {
@@ -142,9 +145,7 @@ func ValidationCheck(goCode string) []string {
 		ok   bool
 	}{
 		{"package main", strings.Contains(goCode, "package main")},
-		{"import syscall", strings.Contains(goCode, `"syscall"`)},
 		{"func main", strings.Contains(goCode, "func main()")},
-		{"hello world string", strings.Contains(goCode, "hello world!")},
 	}
 	for _, c := range checks {
 		if !c.ok {

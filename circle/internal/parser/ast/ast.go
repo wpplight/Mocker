@@ -143,13 +143,38 @@ type EdgeDecl struct {
 	Body []Stmt
 }
 
-// TopologyDecl 拓扑块：<PkgName> { <EdgeRef>* }
-// 块名必须 == 当前 package 名（编译器用此约束验证）
-// 复用 EdgeDecl 形态，body 留空（结构层）—— 真正的走线在 top-level EdgeDecl 里
-type TopologyDecl struct {
+// ──── main 节点专用成员（实例声明 + 边连接） ────
+//
+// 设计：去掉了原来的 TopologyDecl，让 `main` 是个特殊节点。
+// main 节点 body 里可以包含：
+//   - InstanceDecl：声明一个节点实例（`hello happy`）
+//   - EdgeConnDecl：在实例之间连边（`happy <out> p`）
+//
+// 编译器从 main 节点 body 自动分析拓扑。
+//
+// InstanceDecl 实例声明：`typeName varName`
+//
+// 例：`hello happy`           → 用 @hello 类型声明 happy 实例
+//
+//	`stdio.Println p`       → 用 stdio.Println 类型声明 p 实例
+//
+// EdgeConnDecl 边连接：`srcInstance <edgeName> dstInstance`
+//
+// 例：`happy <out> p`          → 在 happy 和 p 之间建 <out> 边
+type InstanceDecl struct {
 	PosBase
-	Name  string      // 块名（== 包名）
-	Edges []*EdgeDecl // 边引用列表（无 body）
+	Type string // 节点类型（"hello" / "stdio.Println"）
+	Name string // 实例名（"happy" / "p"）
+}
+
+// EdgeConnDecl 边连接（main 节点专用）
+//
+// 例：`happy <out> p`          → srcInstance="happy", Edge="out", DstInstance="p"
+type EdgeConnDecl struct {
+	PosBase
+	Src  string // 源实例名
+	Edge string // 边名
+	Dst  string // 目标实例名
 }
 
 // FuncDecl 函数：main{...} / Post(str router){...} / <Post(str router)>{...}
@@ -429,26 +454,29 @@ func (*PackageDecl) declMarker() {}
 func (*ImportDecl) nodeMarker()  {}
 func (*ImportDecl) declMarker()  {}
 
-func (*EnumDecl) nodeMarker()     {}
-func (*EnumDecl) declMarker()     {}
-func (*StructDecl) nodeMarker()   {}
-func (*StructDecl) declMarker()   {}
-func (*EdgeDecl) nodeMarker()     {}
-func (*EdgeDecl) declMarker()     {}
-func (*TopologyDecl) nodeMarker() {}
-func (*TopologyDecl) declMarker() {}
-func (*FuncDecl) nodeMarker()     {}
-func (*FuncDecl) declMarker()     {}
+func (*EnumDecl) nodeMarker()   {}
+func (*EnumDecl) declMarker()   {}
+func (*StructDecl) nodeMarker() {}
+func (*StructDecl) declMarker() {}
+func (*EdgeDecl) nodeMarker()   {}
+func (*EdgeDecl) declMarker()   {}
 
-func (*FieldDecl) nodeMarker()         {}
-func (*FieldDecl) structMemberMarker() {}
-func (*VarDecl) nodeMarker()           {}
-func (*VarDecl) structMemberMarker()   {}
-func (*VarDecl) stmtMarker()           {}
-func (*FlowDecl) nodeMarker()          {}
-func (*FlowDecl) structMemberMarker()  {}
-func (*PortDecl) nodeMarker()          {}
-func (*PortDecl) structMemberMarker()  {}
+func (*FuncDecl) nodeMarker() {}
+func (*FuncDecl) declMarker() {}
+
+func (*FieldDecl) nodeMarker()            {}
+func (*FieldDecl) structMemberMarker()    {}
+func (*VarDecl) nodeMarker()              {}
+func (*VarDecl) structMemberMarker()      {}
+func (*VarDecl) stmtMarker()              {}
+func (*FlowDecl) nodeMarker()             {}
+func (*FlowDecl) structMemberMarker()     {}
+func (*PortDecl) nodeMarker()             {}
+func (*PortDecl) structMemberMarker()     {}
+func (*InstanceDecl) nodeMarker()         {}
+func (*InstanceDecl) structMemberMarker() {}
+func (*EdgeConnDecl) nodeMarker()         {}
+func (*EdgeConnDecl) structMemberMarker() {}
 
 func (*TypeName) nodeMarker()  {}
 func (*TypeName) typeMarker()  {}

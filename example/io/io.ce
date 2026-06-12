@@ -26,12 +26,14 @@ package io
 @write {
     >> num fid
     >> str data
+
+    // passthrough：edge 引用 write.fid/data 当 source，必须有对应 output
+    fid >>
+    data >>
 }
 
-// io 包的内部拓扑：write 的 fid/data 流到 SYSCALL，触发 syscall
-io {
-    write <syscall> SYSCALL {
-        write.fid >> SYSCALL.fid
-        write.data >> SYSCALL.data
-    }
+// write 直接对接 SYSCALL 保留字（编译器内置 emit syscall.Write）
+write <syscall> SYSCALL {
+    write.fid >> SYSCALL.fid
+    write.data >> SYSCALL.data
 }

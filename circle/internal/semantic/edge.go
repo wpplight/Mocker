@@ -123,25 +123,37 @@ func checkFlowStmt(stmt *ast.FlowStmt, edge *ast.EdgeDecl, table *SymbolTable) [
 		return errs
 	}
 
-	// ① 校验 firstNode（如果有前缀）== src，firstAttr 在 src 节点的 in/out 列表里
-	if firstNode != "" && firstNode != src {
+	// ① 校验 firstNode（如果有前缀）== src，firstAttr 在 src 节点的 **out** 列表里
+	//   （注意：src 必须是出度，输入口不能当 source 读——必须显式声明 `name >>`）
+	//   例外：src 是保留节点（SYSCALL 等）→ 编译器内置，跳过校验
+	if IsReservedNode(src) {
+		// reserved node src：跳过 src 校验（编译器内置）
+	} else if firstNode != "" && firstNode != src {
 		errs = append(errs, SemanticError{
 			Pos:  first.Target.Pos(),
 			Msg:  fmt.Sprintf("edge %s body: first step node %q doesn't match src %q", edgeKey(edge), firstNode, src),
 			Hint: fmt.Sprintf("use %q (or just %q if same node)", src+"."+firstAttr, firstAttr),
 		})
 	} else if firstAttr != "" {
-		if _, _, ok := table.GetExport(src, firstAttr); !ok {
+		if _, isOutput, ok := table.GetExport(src, firstAttr); !ok {
 			errs = append(errs, SemanticError{
 				Pos:  first.Target.Pos(),
 				Msg:  fmt.Sprintf("edge %s body: %q has no in/out on src node %q", edgeKey(edge), firstAttr, src),
-				Hint: fmt.Sprintf("declare `>> type %s` (in) or `%s >>` (out) in %s", firstAttr, firstAttr, src),
+				Hint: fmt.Sprintf("declare `%s >>` (out) in %s", firstAttr, src),
+			})
+		} else if !isOutput {
+			errs = append(errs, SemanticError{
+				Pos:  first.Target.Pos(),
+				Msg:  fmt.Sprintf("edge %s body: %q on src %q is an input, not an output (can't read from input)", edgeKey(edge), firstAttr, src),
+				Hint: fmt.Sprintf("either declare `%s >>` (out) for passthrough, or use a different source", firstAttr),
 			})
 		}
 	}
 
 	// ② 校验 lastNode（如果有前缀）== dst，lastAttr 在 dst 节点的 in/out 列表里
-	if lastNode != "" && lastNode != dst {
+	if IsReservedNode(dst) {
+		// dst 是保留节点（SYSCALL 等）→ 编译器内置，跳过校验
+	} else if lastNode != "" && lastNode != dst {
 		errs = append(errs, SemanticError{
 			Pos:  last.Target.Pos(),
 			Msg:  fmt.Sprintf("edge %s body: last step node %q doesn't match dst %q", edgeKey(edge), lastNode, dst),
