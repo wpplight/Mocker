@@ -22,12 +22,9 @@ import io
     >> str msg
     nl := "\n"
     num fid = 1            // 显式类型变量：= 号
-    fid >>
-    data >>
+    data:=msg+nl
+    io.write out;
+    fid >> out.fid
+    data >> out.data
 }
 
-// Println <write> io.write 边：让 Println 通过 <write> 边连到 io.write
-Println <write> io.write {
-    Println.fid >> io.write.fid
-    Println.data >> io.write.data
-}

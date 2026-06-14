@@ -146,14 +146,26 @@ func (t *SymbolTable) addNode(d *ast.StructDecl) *SemanticError {
 				Type: resolveTypeRef(mm.Type),
 				Pos:  mm.Pos(),
 			})
+			// M4.5：`>> out_str`（出度口，无类型）也算 output
+			if mm.Type == nil && !seenOutput[mm.Name] {
+				seenOutput[mm.Name] = true
+				ns.Outputs = append(ns.Outputs, mm.Name)
+			}
 		case *ast.FlowDecl:
 			// 出符号：name >>  →  这个 name 是节点的"出属性"
 			if !seenOutput[mm.Head] {
 				seenOutput[mm.Head] = true
 				ns.Outputs = append(ns.Outputs, mm.Head)
 			}
+		case *ast.VarDecl:
+			// M4.5：state field（`h := "hello"`）也是 output
+			// edge body `hello.h >> world.words` 能找到 h
+			if !seenOutput[mm.Name] {
+				seenOutput[mm.Name] = true
+				ns.Outputs = append(ns.Outputs, mm.Name)
+			}
 		}
-		// VarDecl / FieldDecl 暂不入符号表
+		// FieldDecl 暂不入符号表
 	}
 
 	t.Nodes[d.Name] = ns

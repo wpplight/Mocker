@@ -54,6 +54,16 @@ func DumpNode(name string, n *IRNode) string {
 	for _, out := range n.Outputs {
 		sb.WriteString(fmt.Sprintf("      %s >>\n", out.Name))
 	}
+	for _, si := range n.SubInstances {
+		sb.WriteString(fmt.Sprintf("      SubInstance: %s %s\n", si.TypeName, si.InstanceName))
+	}
+	for _, se := range n.SubEdges {
+		sb.WriteString(fmt.Sprintf("      SubEdge: %s <%s> %s (DstAttr=%s RetAttr=%s)\n",
+			se.SrcAttr, se.EdgeName, se.DstInstance, se.DstAttr, se.RetAttr))
+	}
+	for _, sf := range n.SubFlows {
+		sb.WriteString(fmt.Sprintf("      SubFlow: %s >> %s.%s\n", sf.SrcAttr, sf.DstInstance, sf.DstAttr))
+	}
 	for _, s := range n.Init {
 		sb.WriteString(fmt.Sprintf("      init: %v\n", s))
 	}

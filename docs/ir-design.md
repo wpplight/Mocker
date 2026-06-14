@@ -154,10 +154,41 @@ type IRNode struct {
     // 持久状态（可选）
     State []IRField
 
+    // M4.5 新增：节点 body 内的 sub-graph（构造函数编排器）
+    //
+    // 节点 body 可以声明 sub-instance + sub-edge，构造时递归构造
+    //   SubInstances: 节点 body 内嵌的子实例（world w, stdio.Println p）
+    //   SubEdges:     sub-instance 之间的边（h <add_str> w, out_str >> p.msg）
+    //   SubFlows:     内部 flow（srcAttr → DstInstance.DstAttr）
+    SubInstances []*IRSubInstance  // {TypeName, InstanceName}
+    SubEdges     []*IRSubEdge      // {SrcAttr, EdgeName, DstInstance, DstAttr}
+    SubFlows      []*IRSubFlow      // {SrcAttr, DstInstance, DstAttr}
+
     // codegen 用（拓扑分析后填入）
     AutoExec     bool     // 至少一个 block 是 auto-exec
     UsedBlocks   []int    // 拓扑用到的 block 索引
     ReferencedBy []string // 被哪些边引用
+}
+
+// IRSubInstance（M4.5 新增）— 节点 body 内的子实例
+type IRSubInstance struct {
+    TypeName     string // 节点类型名（"world" / "stdio.Println"）
+    InstanceName string // 实例名（"w" / "p"）
+}
+
+// IRSubEdge（M4.5 新增）— sub-instance 之间的 sub-edge 连接
+type IRSubEdge struct {
+    SrcAttr      string // 源属性名（"h" / "out_str"）
+    EdgeName     string // 边名（"add_str" 等）
+    DstInstance  string // 目标实例名
+    DstAttr      string // 目标属性名（"" 表示"整个 output"）
+}
+
+// IRSubFlow（M4.5 新增）— 节点 body 内的内部 flow
+type IRSubFlow struct {
+    SrcAttr     string // 源属性名
+    DstInstance string // 目标 sub-instance 名
+    DstAttr     string // 目标 input 端口名
 }
 
 type IRInput struct {

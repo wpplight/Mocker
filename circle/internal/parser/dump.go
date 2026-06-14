@@ -95,7 +95,45 @@ func dumpMember(sb *strings.Builder, m ast.StructMember, depth int) {
 		fmt.Fprintf(sb, "InstanceDecl %s %s\n", v.Type, v.Name)
 	case *ast.EdgeConnDecl:
 		fmt.Fprintf(sb, "EdgeConnDecl %s <%s> %s\n", v.Src, v.Edge, v.Dst)
+	case *ast.SubInstanceDecl:
+		fmt.Fprintf(sb, "SubInstanceDecl %s %s\n", v.Type, v.Name)
+	case *ast.SubEdgeDecl:
+		fmt.Fprintf(sb, "SubEdgeDecl %s <%s> %s\n", v.Src, v.Edge, v.Dst)
+	case *ast.IfStmt:
+		dumpStmt(sb, v, depth)
+	case *ast.ForStmt:
+		dumpStmt(sb, v, depth)
+	case *ast.WhileStmt:
+		dumpStmt(sb, v, depth)
+	case *ast.AssignStmt:
+		dumpStmt(sb, v, depth)
 	}
+}
+
+// dumpStmtShort 把 stmt 拍平成一行（用于 ForStmt/WhileStmt 头）
+func dumpStmtShort(s ast.Stmt) string {
+	if s == nil {
+		return ""
+	}
+	var sb strings.Builder
+	switch v := s.(type) {
+	case *ast.VarDecl:
+		fmt.Fprintf(&sb, "%s := %s", v.Name, dumpExpr(v.Init))
+	case *ast.AssignStmt:
+		if v.Compound != "" {
+			if v.Rhs == nil {
+				fmt.Fprintf(&sb, "%s%s", v.Lhs[0], v.Compound+v.Compound)
+			} else {
+				fmt.Fprintf(&sb, "%s %s= %s", v.Lhs[0], v.Compound, dumpExpr(v.Rhs))
+			}
+		} else {
+			fmt.Fprintf(&sb, "%s := %s", strings.Join(v.Lhs, ", "), dumpExpr(v.Rhs))
+		}
+	default:
+		fmt.Fprintf(&sb, "?(%T)", s)
+		_ = v
+	}
+	return sb.String()
 }
 
 func dumpStmt(sb *strings.Builder, s ast.Stmt, depth int) {
@@ -107,7 +145,17 @@ func dumpStmt(sb *strings.Builder, s ast.Stmt, depth int) {
 			dumpFlowChain(sb, v.Flow, depth+1)
 		}
 	case *ast.AssignStmt:
-		fmt.Fprintf(sb, "AssignStmt %s := %s\n", strings.Join(v.Lhs, ", "), dumpExpr(v.Rhs))
+		if v.Compound != "" {
+			if v.Rhs == nil {
+				// i++  /  i--
+				fmt.Fprintf(sb, "AssignStmt %s%s\n", v.Lhs[0], v.Compound+v.Compound)
+			} else {
+				// a += b
+				fmt.Fprintf(sb, "AssignStmt %s %s %s\n", v.Lhs[0], v.Compound, dumpExpr(v.Rhs))
+			}
+		} else {
+			fmt.Fprintf(sb, "AssignStmt %s := %s\n", strings.Join(v.Lhs, ", "), dumpExpr(v.Rhs))
+		}
 	case *ast.IfStmt:
 		fmt.Fprintf(sb, "IfStmt %s {\n", dumpExpr(v.Cond))
 		if v.Body != nil {
@@ -138,6 +186,24 @@ func dumpStmt(sb *strings.Builder, s ast.Stmt, depth int) {
 		} else {
 			fmt.Fprintf(sb, "ReturnStmt %s\n", dumpExpr(v.Value))
 		}
+	case *ast.ForStmt:
+		fmt.Fprintf(sb, "ForStmt(init=%s, cond=%s, post=%s) {\n", dumpStmtShort(v.Init), dumpExpr(v.Cond), dumpStmtShort(v.Post))
+		if v.Body != nil {
+			for _, s2 := range v.Body.Stmts {
+				dumpStmt(sb, s2, depth+1)
+			}
+		}
+		indent(sb, depth)
+		sb.WriteString("}\n")
+	case *ast.WhileStmt:
+		fmt.Fprintf(sb, "WhileStmt(%s) {\n", dumpExpr(v.Cond))
+		if v.Body != nil {
+			for _, s2 := range v.Body.Stmts {
+				dumpStmt(sb, s2, depth+1)
+			}
+		}
+		indent(sb, depth)
+		sb.WriteString("}\n")
 	case *ast.Connection:
 		hops := make([]string, len(v.Hops))
 		for i, h := range v.Hops {

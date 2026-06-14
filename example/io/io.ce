@@ -22,18 +22,13 @@ package io
 //                                       (保留字)      (Go syscall)
 
 // io.write 写一段字节到文件描述符 fid
-// 内部通过 <syscall> 边对接 SYSCALL 保留字
+// 内部对接 SYSCALL 保留字
 @write {
     >> num fid
     >> str data
 
     // passthrough：edge 引用 write.fid/data 当 source，必须有对应 output
-    fid >>
-    data >>
+    fid >>SYSCALL.fid
+    data >>SYSCALL.data
 }
 
-// write 直接对接 SYSCALL 保留字（编译器内置 emit syscall.Write）
-write <syscall> SYSCALL {
-    write.fid >> SYSCALL.fid
-    write.data >> SYSCALL.data
-}

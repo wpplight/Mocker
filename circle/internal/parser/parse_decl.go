@@ -22,10 +22,12 @@ func (p *Parser) parseTopDecl() ast.Decl {
 	name := p.consume(mocker_lex.TypeID).Value
 
 	// main 是语言保留字：当 NodeDecl 解析（简化版的特殊节点）
-	// main { ... } body 包含 InstanceDecl + EdgeConnDecl，由 IR 层 lowerMainTopology 处理
+	// main { ... } body 包含 InstanceDecl（entry 声明），由 IR 层 lowerMainTopology 处理
 	if name == "main" {
 		pos := p.peek().Pos // { 的位置
 		_ = pos
+		p.inMainNode = true
+		defer func() { p.inMainNode = false }()
 		return p.parseStructBody(p.peek().Pos, "main", false, ast.StructKindNode)
 	}
 
@@ -226,22 +228,78 @@ func (p *Parser) parseStructMember() ast.StructMember {
 		return p.parsePortDecl()
 	}
 
-	// 形式 4 + 5（main 节点专用）：InstanceDecl / EdgeConnDecl
-	// 必须在 typed field 检查之前！否则 `hello happy` 会被当成 FieldDecl
-	if tok.Type == mocker_lex.TypeID {
-		// 子形式 5：`src <edge> dst` → EdgeConnDecl
-		if p.peekN(1).Type == mocker_lex.TypeOP_LT {
-			return p.parseEdgeConnDecl()
+	// 形式 6：控制流语句（if / for / while）→ *ast.IfStmt / *ast.ForStmt / *ast.WhileStmt
+	//   例：if cond { ... } else { ... }
+	//       for(init; cond; post) { ... }
+	//       while(cond) { ... }
+	// 这些是“节点 body 内的标准控制流”（M4.6），不能跨入度/出度。
+	switch tok.Type {
+	case mocker_lex.TypeKW_IF:
+		s := p.parseIf()
+		if s == nil {
+			return nil
 		}
-		// 子形式 4：`typeName varName` → InstanceDecl（peekN(1) 是 IDENT 或 CALL）
+		// parseIf 返回 *ast.IfStmt，同时实现 ast.Stmt 和 ast.StructMember
+		if sm, ok := s.(ast.StructMember); ok {
+			return sm
+		}
+		return nil
+	case mocker_lex.TypeKW_FOR:
+		s := p.parseFor()
+		if s == nil {
+			return nil
+		}
+		if sm, ok := s.(ast.StructMember); ok {
+			return sm
+		}
+		return nil
+	case mocker_lex.TypeKW_WHILE:
+		s := p.parseWhile()
+		if s == nil {
+			return nil
+		}
+		if sm, ok := s.(ast.StructMember); ok {
+			return sm
+		}
+		return nil
+	}
+
+	// 形式 5b：`<edge> dst` → SubEdgeDecl（不带源，由 IR 阶段推断）
+	//   语法糖：<add_str> w   等价于  <auto_infer> <add_str> w
+	//   - 调用方必须提供"非 input"变量供 edge body 的第一个 flow 使用
+	//   - 推断逻辑在 ir/lower.go:inferSubEdgeSrc 里实现
+	//   - 仅限非 main body（main 里 src/dst 都是 instance，不存在 state 变量可推）
+	if tok.Type == mocker_lex.TypeOP_LT && !p.inMainNode && p.isImplicitSubEdgeSig() {
+		return p.parseImplicitSubEdgeDecl()
+	}
+
+	// 形式 4 + 5：节点 body 内的 sub-instance / sub-edge（M4.5）
+	// 必须在 typed field 检查之前！否则 `hello happy` 会被当成 FieldDecl
+	// main body 用 InstanceDecl/EdgeConnDecl（entry 声明）
+	// 其他节点 body 用 SubInstanceDecl/SubEdgeDecl（sub-graph 声明）
+	if tok.Type == mocker_lex.TypeID {
+		// 子形式 5：`src <edge> dst` → SubEdgeDecl（或 EdgeConnDecl in main）
+		if p.peekN(1).Type == mocker_lex.TypeOP_LT {
+			if p.inMainNode {
+				return p.parseEdgeConnDecl()
+			}
+			return p.parseSubEdgeDecl()
+		}
+		// 子形式 4：`typeName varName` → InstanceDecl / SubInstanceDecl
 		if p.peekN(1).Type == mocker_lex.TypeID {
-			return p.parseInstanceDecl()
+			if p.inMainNode {
+				return p.parseInstanceDecl()
+			}
+			return p.parseSubInstanceDecl()
 		}
 	}
-	// CALL 形式：`pkg.Node varName` → InstanceDecl（跨包）
+	// CALL 形式：`pkg.Node varName` → 跨包子实例
 	if tok.Type == mocker_lex.TypeCALL {
 		if p.peekN(1).Type == mocker_lex.TypeID {
-			return p.parseInstanceDecl()
+			if p.inMainNode {
+				return p.parseInstanceDecl()
+			}
+			return p.parseSubInstanceDecl()
 		}
 	}
 
@@ -287,6 +345,22 @@ func (p *Parser) parseStructMember() ast.StructMember {
 	// := 类型推断，类型从 expr 推论
 	if tok.Type == mocker_lex.TypeID && p.peekN(1).Type == mocker_lex.TypeOP_DEFINE {
 		return p.parseVarDeclInStruct()
+	}
+
+	// 形式 2.7：复合赋值 x += y / x -= y / x *= y / x /= y
+	if tok.Type == mocker_lex.TypeID &&
+		(p.peekN(1).Type == mocker_lex.TypeOP_ADD_ASSIGN ||
+			p.peekN(1).Type == mocker_lex.TypeOP_SUB_ASSIGN ||
+			p.peekN(1).Type == mocker_lex.TypeOP_MUL_ASSIGN ||
+			p.peekN(1).Type == mocker_lex.TypeOP_DIV_ASSIGN) {
+		s := p.parseVarDeclOrAssign()
+		if s == nil {
+			return nil
+		}
+		if sm, ok := s.(ast.StructMember); ok {
+			return sm
+		}
+		return nil
 	}
 
 	// 形式 2.5：EXPR >>  表达式流出糖
@@ -379,6 +453,105 @@ func (p *Parser) parseEdgeConnDecl() ast.StructMember {
 	}
 }
 
+// parseSubInstanceDecl 解析 `typeName varName;`（节点 body 内的 sub-instance 声明）
+//
+// 与 parseInstanceDecl 区别：emit SubInstanceDecl 而不是 InstanceDecl
+// 用于 hello { world w; stdio.Println p; ... } 这种节点 body 内的 sub-instance
+func (p *Parser) parseSubInstanceDecl() ast.StructMember {
+	pos := p.peek().Pos
+	typeName := p.consume(p.peek().Type).Value // IDENT 或 CALL
+	varName := p.consume(mocker_lex.TypeID).Value
+	if p.match(mocker_lex.TypeSEP_SEMI) {
+		p.consume(mocker_lex.TypeSEP_SEMI)
+	}
+	return &ast.SubInstanceDecl{
+		PosBase: ast.PosBase{P: pos},
+		Type:    typeName,
+		Name:    varName,
+	}
+}
+
+// parseSubEdgeDecl 解析 `src <edge> dst`（节点 body 内的 sub-edge 连接）
+//
+// 与 parseEdgeConnDecl 区别：emit SubEdgeDecl 而不是 EdgeConnDecl
+// 用于 hello { h <add_str> w } 这种节点 body 内的 sub-edge
+func (p *Parser) parseSubEdgeDecl() ast.StructMember {
+	pos := p.peek().Pos
+	srcName := p.consume(mocker_lex.TypeID).Value
+	p.consume(mocker_lex.TypeOP_LT)
+	// edge name: EDGE_NAME（含 -）或 IDENT（普通的 out）
+	var edgeName string
+	switch p.peek().Type {
+	case mocker_lex.TypeEDGE_NAME, mocker_lex.TypeID:
+		edgeName = p.consume(p.peek().Type).Value
+	default:
+		p.errorf("expected edge name, got %s", p.peek().Type)
+		p.pos++
+		return nil
+	}
+	p.consume(mocker_lex.TypeOP_GT)
+	dstName := p.consume(mocker_lex.TypeID).Value
+	return &ast.SubEdgeDecl{
+		PosBase: ast.PosBase{P: pos},
+		Src:     srcName,
+		Edge:    edgeName,
+		Dst:     dstName,
+	}
+}
+
+// isImplicitSubEdgeSig peek 是否匹配：< EDGE_NAME/IDENT/CALL > IDENT/CALL
+//
+// 例：<add_str> w      或   <add_str> pkg.Node
+// 用于在 parseStructMember 里识别"隐式 SubEdge"糖。
+func (p *Parser) isImplicitSubEdgeSig() bool {
+	if p.peek().Type != mocker_lex.TypeOP_LT {
+		return false
+	}
+	// < edge_name
+	n1 := p.peekN(1).Type
+	if n1 != mocker_lex.TypeEDGE_NAME && n1 != mocker_lex.TypeID && n1 != mocker_lex.TypeCALL {
+		return false
+	}
+	// edge_name >
+	if p.peekN(2).Type != mocker_lex.TypeOP_GT {
+		return false
+	}
+	// dst 必须是 IDENT 或 CALL
+	n3 := p.peekN(3).Type
+	if n3 != mocker_lex.TypeID && n3 != mocker_lex.TypeCALL {
+		return false
+	}
+	return true
+}
+
+// parseImplicitSubEdgeDecl 解析 `<edge> dst`（不带源，由 IR 推断）
+//
+// 与 parseSubEdgeDecl 区别：Src 留空
+//   - <add_str> w   →  SubEdgeDecl{Src:"", Edge:"add_str", Dst:"w"}
+//   - 后续由 ir/lower.go:inferSubEdgeSrc 根据 edge body 推断 Src
+func (p *Parser) parseImplicitSubEdgeDecl() ast.StructMember {
+	pos := p.peek().Pos
+	p.consume(mocker_lex.TypeOP_LT)
+	// edge name
+	var edgeName string
+	switch p.peek().Type {
+	case mocker_lex.TypeEDGE_NAME, mocker_lex.TypeID, mocker_lex.TypeCALL:
+		edgeName = p.consume(p.peek().Type).Value
+	default:
+		p.errorf("expected edge name, got %s", p.peek().Type)
+		p.pos++
+		return nil
+	}
+	p.consume(mocker_lex.TypeOP_GT)
+	dstName := p.consume(p.peek().Type).Value
+	return &ast.SubEdgeDecl{
+		PosBase: ast.PosBase{P: pos},
+		Src:     "", // 隐式：留给 IR 推断
+		Edge:    edgeName,
+		Dst:     dstName,
+	}
+}
+
 // skipTrivial 跳过 SEMI / 空行 等
 func (p *Parser) skipTrivial() {
 	for p.match(mocker_lex.TypeSEP_SEMI) {
@@ -410,9 +583,32 @@ func (p *Parser) isTypedFieldStart() bool {
 }
 
 // parsePortDecl >> str hey
+// parsePortDecl 解析 `>> [type] name`
+//
+// 支持两种形式：
+//   - 带类型：`>> str msg`（入度端口，类型是关键字 str/num 等）
+//   - 无类型：`>> out_str`（出度端口，类型推断）
+//
+// 判别规则：peekN(1) 是 IDENT 时，第一个 IDENT 是 type（带类型）；否则直接 name。
 func (p *Parser) parsePortDecl() *ast.PortDecl {
 	pos := p.consume(mocker_lex.TypeOP_RRARROW).Pos
-	typ := p.parseTypeRef()
+
+	var typ ast.TypeRef
+	tok := p.peek()
+	// 类型关键字（str/num/...）总是 type
+	isTypeKeyword := tok.Type == mocker_lex.TypeTYPE_STR ||
+		tok.Type == mocker_lex.TypeTYPE_NUM ||
+		tok.Type == mocker_lex.TypeTYPE_BOOL ||
+		tok.Type == mocker_lex.TypeTYPE_BYTE ||
+		tok.Type == mocker_lex.TypeTYPE_ANY
+	// TypeID 后跟 TypeID 也算 type（如 `str msg` → str=type, msg=name）
+	isUserType := tok.Type == mocker_lex.TypeID && p.peekN(1).Type == mocker_lex.TypeID
+
+	if isTypeKeyword || isUserType {
+		typ = p.parseTypeRef()
+	}
+
+	// 接下来必须是 port name (IDENT)
 	if !p.match(mocker_lex.TypeID) {
 		p.errorf("expected port name, got %s", p.peek().Type)
 		return nil
@@ -423,7 +619,6 @@ func (p *Parser) parsePortDecl() *ast.PortDecl {
 		PosBase: ast.PosBase{P: pos},
 		Type:    typ,
 		Name:    name,
-		// Body: 暂留空，等 lexer 支持 INDENT/DEDENT 后激活
 	}
 }
 

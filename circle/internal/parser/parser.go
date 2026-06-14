@@ -20,6 +20,7 @@ type Parser struct {
 	errors           []ParseError
 	syntheticCounter int    // 语法糖生成的合成变量计数器（msg+nl 之类）
 	currentPkg       string // 当前包名（用于拓扑块识别：块名 == 包名）
+	inMainNode       bool   // M4.5：当前在解析 main 节点 body（决定 emit InstanceDecl vs SubInstanceDecl）
 }
 
 // nextSynthetic 生成下一个合成变量名

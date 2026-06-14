@@ -224,7 +224,12 @@ const (
 func (d *StructDecl) Pos() Pos { return d.Pos }
 
 // StructMember 是 struct/node/edge body 里的成员
-// 用一个 Sum Type 表示，3 种合法形式
+// 用一个 Sum Type 表示，多种合法形式
+//
+// M4.5 新增：
+//   - SubInstanceDecl：节点 body 内的 sub-instance 声明（`world w;`）
+//   - SubEdgeDecl：节点 body 内的 sub-edge 连接（`h <add_str> w`）
+//   - FlowDecl 扩展支持内部 flow 到 sub-instance（`out_str >> p.msg;`）
 type StructMember interface {
     Node
     structMemberMarker()
@@ -248,6 +253,8 @@ type VarDecl struct {
 func (v *VarDecl) Pos() Pos { return v.Pos }
 
 // FlowDecl 裸字段 / 导出字段：h  /  h >>  /  h>>msg>>
+// M4.5：也可作为内部 flow 到 sub-instance 的 input
+//   例：`out_str >> p.msg;` — out_str 流到 p 这个 sub-instance 的 msg 端口
 type FlowDecl struct {
     Pos   Pos
     Head  string       // 字段名
@@ -263,6 +270,37 @@ type PortDecl struct {
     Body []Stmt        // 端口体（INDENT Stmt+ DEDENT）
 }
 func (p *PortDecl) Pos() Pos { return p.Pos }
+
+// SubInstanceDecl（M4.5 新增）
+// 节点 body 内的 sub-instance 声明：`TypeName varName;`
+//
+// 例：`world w;`（在 hello 节点 body 内声明一个 world 实例）
+//
+// 与 InstanceDecl（main body 用）的区别：
+//   - InstanceDecl：main 节点 body 专用，作为 entry 声明
+//   - SubInstanceDecl：任何节点 body 内可用，作为内部子实例
+type SubInstanceDecl struct {
+    Pos  Pos
+    Type string // 节点类型（"world" / "stdio.Println"）
+    Name string // 实例名（"w" / "p"）
+}
+func (s *SubInstanceDecl) Pos() Pos { return s.Pos }
+
+// SubEdgeDecl（M4.5 新增）
+// 节点 body 内的 sub-edge 连接：`src <edge_name> dst`
+//
+// 例：`h <add_str> w`（在 hello 内部，h → w，via <add_str> 边）
+//
+// 与 EdgeConnDecl（main body 用）的区别：
+//   - EdgeConnDecl：main 节点 body 专用，作为入口拓扑
+//   - SubEdgeDecl：任何节点 body 内可用，作为内部子图连接
+type SubEdgeDecl struct {
+    Pos  Pos
+    Src  string // 源实例名（节点 body 内的 sub-instance）
+    Edge string // 边名
+    Dst  string // 目标实例名
+}
+func (s *SubEdgeDecl) Pos() Pos { return s.Pos }
 
 // EdgeDecl 边声明（带源/汇的完整形式）：hello <out> say { ... }
 type EdgeDecl struct {

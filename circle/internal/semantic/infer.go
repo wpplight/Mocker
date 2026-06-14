@@ -91,10 +91,9 @@ func resolveMemberIntoEnv(m ast.StructMember, env *NodeTypeEnv) {
 		// 推断 Init 的类型
 		t := InferExprType(s.Init, env)
 		env.Set(s.Name, t)
-		// 如果有 Flow（h := "hi" >>），这个 h 也是个 output
-		if s.Flow != nil && len(s.Flow.Steps) > 0 {
-			env.SetOutput(s.Name, t)
-		}
+		// M4.5：state field 也是可被 flow 引用的 output
+		// 例：`h := "hello"` 后，edge body `hello.h >> world.words` 能找到 h
+		env.SetOutput(s.Name, t)
 
 	case *ast.FlowDecl:
 		// h >> （裸 out）或 h >> a.b （out with chain）
@@ -108,10 +107,13 @@ func resolveMemberIntoEnv(m ast.StructMember, env *NodeTypeEnv) {
 		}
 
 	case *ast.PortDecl:
-		// >> type name（输入口）
+		// >> type name（输入口） 或 >> name（出度口，无类型）
 		if s.Type != nil {
 			t := resolveTypeRef(s.Type)
 			env.SetOutput(s.Name, t)
+		} else {
+			// M4.5：`>> out_str`（出度口，无类型）也加到 Outputs
+			env.SetOutput(s.Name, TypeUnknown)
 		}
 	}
 }

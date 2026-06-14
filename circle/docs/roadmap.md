@@ -20,10 +20,15 @@
 | CLI dump（debug 工具） | — | ✅ 完成 | — |
 | **Semantic（骨架）** | M3 | ✅ MVP + 跨包 + Style2 + SYSCALL + 类型推导 + 隐式初始化 | ✅ 完成 |
 | **IR** | M4 上半 | ✅ 数据结构 + Lower + dump + AnalyzeTopology | ✅ 完成 |
-| **Codegen** | M4 下半 | ❌ 未开始 | 3-5 天 |
-| **Runtime（Go 写）** | M5 | ❌ 未开始 | 2-3 天 |
-| **CLI build pipeline** | M6 | ❌ 未开始 | 1-2 天 |
-| **端到端验证** | M7 | ❌ 未开始 | 1-2 天 |
+| **Codegen（直链 + Run 方法）** | M4.3 | ✅ 完成 | ✅ 完成 |
+| **Codegen（图分析 + dead-code 消除）** | M4.4 | ✅ 完成 | ✅ 完成 |
+| **Codegen（构造函数编排器模式）** | M4.5 | 🟡 实施中 | 1-2 天 |
+| 节点 body 内的 sub-graph 语法 | M4.5a | 🟡 实施中 | — |
+| 构造函数 emit 改造 | M4.5b | 🟡 实施中 | — |
+| 端到端 hello world 验证 | M4.5c | ⏳ 待验证 | — |
+| **Runtime（Go 写）** | M5 | ⏸️ 暂停（已合并到 codegen）| — |
+| **CLI build pipeline** | M6 | ✅ 完成（`circle run` 已能编译+跑）| — |
+| **端到端验证** | M7 | 🟡 部分验证（hello world）| 1-2 天 |
 | **CI / release** | M10 | ❌ 未开始 | 1 天 |
 
 **MVP 路径：2 周**（12 个工作日）。**生产质量：4 周**（20 个工作日 + bug 修复 + 文档）。

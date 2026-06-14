@@ -72,6 +72,8 @@ const (
 	TypeKW_ENUM
 	TypeKW_IF
 	TypeKW_ELSE
+	TypeKW_FOR
+	TypeKW_WHILE
 	TypeKW_RETURN
 	TypeKW_TRUE
 	TypeKW_FALSE
@@ -84,15 +86,21 @@ const (
 	TypeTYPE_ANY
 
 	// OP 多字符
-	TypeOP_RRARROW // >>
-	TypeOP_LARROW  // <<
-	TypeOP_DEFINE  // :=
-	TypeOP_EQ      // ==
-	TypeOP_NE      // !=
-	TypeOP_LE      // <=
-	TypeOP_GE      // >=
-	TypeOP_AND     // &&
-	TypeOP_OR      // ||
+	TypeOP_RRARROW    // >>
+	TypeOP_LARROW     // <<
+	TypeOP_DEFINE     // :=
+	TypeOP_EQ         // ==
+	TypeOP_NE         // !=
+	TypeOP_LE         // <=
+	TypeOP_GE         // >=
+	TypeOP_AND        // &&
+	TypeOP_OR         // ||
+	TypeOP_ADD_ASSIGN // +=
+	TypeOP_SUB_ASSIGN // -=
+	TypeOP_MUL_ASSIGN // *=
+	TypeOP_DIV_ASSIGN // /=
+	TypeOP_INC        // ++
+	TypeOP_DEC        // --
 
 	// OP 单字符
 	TypeOP_NOT // !
@@ -137,6 +145,8 @@ var typeNames = [...]string{
 	TypeKW_ENUM:   "KW_ENUM",
 	TypeKW_IF:     "KW_IF",
 	TypeKW_ELSE:   "KW_ELSE",
+	TypeKW_FOR:    "KW_FOR",
+	TypeKW_WHILE:  "KW_WHILE",
 	TypeKW_RETURN: "KW_RETURN",
 	TypeKW_TRUE:   "KW_TRUE",
 	TypeKW_FALSE:  "KW_FALSE",
@@ -147,16 +157,22 @@ var typeNames = [...]string{
 	TypeTYPE_BYTE: "TYPE_BYTE",
 	TypeTYPE_ANY:  "TYPE_ANY",
 
-	TypeOP_RRARROW: "OP_RRARROW",
-	TypeOP_LARROW:  "OP_LARROW",
-	TypeOP_DEFINE:  "OP_DEFINE",
-	TypeOP_EQ:      "OP_EQ",
-	TypeOP_NE:      "OP_NE",
-	TypeOP_LE:      "OP_LE",
-	TypeOP_GE:      "OP_GE",
-	TypeOP_AND:     "OP_AND",
-	TypeOP_OR:      "OP_OR",
-	TypeOP_NOT:     "OP_NOT",
+	TypeOP_RRARROW:    "OP_RRARROW",
+	TypeOP_LARROW:     "OP_LARROW",
+	TypeOP_DEFINE:     "OP_DEFINE",
+	TypeOP_EQ:         "OP_EQ",
+	TypeOP_NE:         "OP_NE",
+	TypeOP_LE:         "OP_LE",
+	TypeOP_GE:         "OP_GE",
+	TypeOP_AND:        "OP_AND",
+	TypeOP_OR:         "OP_OR",
+	TypeOP_ADD_ASSIGN: "OP_ADD_ASSIGN",
+	TypeOP_SUB_ASSIGN: "OP_SUB_ASSIGN",
+	TypeOP_MUL_ASSIGN: "OP_MUL_ASSIGN",
+	TypeOP_DIV_ASSIGN: "OP_DIV_ASSIGN",
+	TypeOP_INC:        "OP_INC",
+	TypeOP_DEC:        "OP_DEC",
+	TypeOP_NOT:        "OP_NOT",
 
 	TypeOP_LT:     "OP_LT",
 	TypeOP_GT:     "OP_GT",
@@ -196,6 +212,8 @@ var typeKinds = [...]Kind{
 	TypeKW_ENUM:   KindKW,
 	TypeKW_IF:     KindKW,
 	TypeKW_ELSE:   KindKW,
+	TypeKW_FOR:    KindKW,
+	TypeKW_WHILE:  KindKW,
 	TypeKW_RETURN: KindKW,
 	TypeKW_TRUE:   KindKW,
 	TypeKW_FALSE:  KindKW,
@@ -206,23 +224,29 @@ var typeKinds = [...]Kind{
 	TypeTYPE_BYTE: KindTYPE,
 	TypeTYPE_ANY:  KindTYPE,
 
-	TypeOP_RRARROW: KindOP,
-	TypeOP_LARROW:  KindOP,
-	TypeOP_DEFINE:  KindOP,
-	TypeOP_EQ:      KindOP,
-	TypeOP_NE:      KindOP,
-	TypeOP_LE:      KindOP,
-	TypeOP_GE:      KindOP,
-	TypeOP_AND:     KindOP,
-	TypeOP_OR:      KindOP,
-	TypeOP_NOT:     KindOP,
-	TypeOP_LT:      KindOP,
-	TypeOP_GT:      KindOP,
-	TypeOP_ASSIGN:  KindOP,
-	TypeOP_ADD:     KindOP,
-	TypeOP_SUB:     KindOP,
-	TypeOP_MUL:     KindOP,
-	TypeOP_DIV:     KindOP,
+	TypeOP_RRARROW:    KindOP,
+	TypeOP_LARROW:     KindOP,
+	TypeOP_ADD_ASSIGN: KindOP,
+	TypeOP_SUB_ASSIGN: KindOP,
+	TypeOP_MUL_ASSIGN: KindOP,
+	TypeOP_DIV_ASSIGN: KindOP,
+	TypeOP_INC:        KindOP,
+	TypeOP_DEC:        KindOP,
+	TypeOP_DEFINE:     KindOP,
+	TypeOP_EQ:         KindOP,
+	TypeOP_NE:         KindOP,
+	TypeOP_LE:         KindOP,
+	TypeOP_GE:         KindOP,
+	TypeOP_AND:        KindOP,
+	TypeOP_OR:         KindOP,
+	TypeOP_NOT:        KindOP,
+	TypeOP_LT:         KindOP,
+	TypeOP_GT:         KindOP,
+	TypeOP_ASSIGN:     KindOP,
+	TypeOP_ADD:        KindOP,
+	TypeOP_SUB:        KindOP,
+	TypeOP_MUL:        KindOP,
+	TypeOP_DIV:        KindOP,
 
 	TypeSEP_AT:       KindSEP,
 	TypeSEP_LPAREN:   KindSEP,
@@ -286,6 +310,8 @@ var keywords = map[string]Type{
 	"enum":    TypeKW_ENUM,
 	"if":      TypeKW_IF,
 	"else":    TypeKW_ELSE,
+	"for":     TypeKW_FOR,
+	"while":   TypeKW_WHILE,
 	"return":  TypeKW_RETURN,
 	"true":    TypeKW_TRUE,
 	"false":   TypeKW_FALSE,
@@ -335,6 +361,12 @@ var multiCharTypes = map[string]Type{
 	">=": TypeOP_GE,
 	"&&": TypeOP_AND,
 	"||": TypeOP_OR,
+	"+=": TypeOP_ADD_ASSIGN, // 复合赋值：a += b
+	"-=": TypeOP_SUB_ASSIGN,
+	"*=": TypeOP_MUL_ASSIGN,
+	"/=": TypeOP_DIV_ASSIGN,
+	"++": TypeOP_INC, // 增量：i++
+	"--": TypeOP_DEC, // 减量：i--
 }
 
 // ──── 字符分类辅助 ────

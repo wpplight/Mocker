@@ -4,12 +4,19 @@
 // 每个节点都实现 Node 接口（带 Pos()），并通过空方法 marker() 防止类型混淆。
 package ast
 
+import "fmt"
+
 // Pos 源码位置（行/列/字节偏移）。
 // 当前由 parser 在 tokenize 之后用 wrapper 注入，line/col/offset 都从 0 开始。
 type Pos struct {
 	Line   int
 	Col    int
 	Offset int
+}
+
+// String 把 Pos 渲染成 "line:col" 字符串（错误信息用）
+func (p Pos) String() string {
+	return fmt.Sprintf("%d:%d", p.Line, p.Col)
 }
 
 // ──── 通用接口 ────
@@ -177,6 +184,36 @@ type EdgeConnDecl struct {
 	Dst  string // 目标实例名
 }
 
+// ──── M4.5：节点 body 内的 sub-graph 成员 ────
+//
+// 设计：节点 body 内的 sub-instance + sub-edge 让每个节点"自带 sub-graph"，
+// 构造时递归编排（NewXxx() 创建子实例 + 调子方法）。
+//
+// 与 InstanceDecl/EdgeConnDecl 的区别：
+//   - InstanceDecl/EdgeConnDecl：原 main body 专用
+//   - SubInstanceDecl/SubEdgeDecl：节点 body 内的 sub-graph
+
+// SubInstanceDecl 节点 body 内的 sub-instance 声明
+//
+// 例：`world w;`（在 hello body 内声明 world 实例）
+//
+//	`stdio.Println p;`（在 hello body 内声明 Println 实例）
+type SubInstanceDecl struct {
+	PosBase
+	Type string // 节点类型（"world" / "stdio.Println"）
+	Name string // 实例名（"w" / "p"）
+}
+
+// SubEdgeDecl 节点 body 内的 sub-edge 连接
+//
+// 例：`h <add_str> w`（在 hello body 内，h → w，via <add_str>）
+type SubEdgeDecl struct {
+	PosBase
+	Src  string // 源实例名（节点 body 内的 sub-instance）
+	Edge string // 边名
+	Dst  string // 目标实例名
+}
+
 // FuncDecl 函数：main{...} / Post(str router){...} / <Post(str router)>{...}
 type FuncDecl struct {
 	PosBase
@@ -261,6 +298,31 @@ type IfStmt struct {
 	Else Stmt // *BlockStmt 或 *IfStmt
 }
 
+// ForStmt for(init; cond; post) { ... }
+//
+// 变体：
+//   - C 风格：for(init; cond; post) { body }
+//   - Go while：for cond { body }           （Init=nil, Post=nil）
+//   - 无限循环：for { body }                 （Init=nil, Cond=nil, Post=nil）
+//
+// 括号是必须的（避免与 node body 内的 ">>" 冲突）
+type ForStmt struct {
+	PosBase
+	Init Stmt // *ast.VarDecl / *ast.AssignStmt / nil
+	Cond Expr // nil 表示条件不写
+	Post Stmt // *ast.AssignStmt / nil
+	Body *BlockStmt
+}
+
+// WhileStmt while(cond) { ... }
+//
+// Mocker 专用语法（Go 里 while 不存在）—— codegen 时转成 for cond { body }
+type WhileStmt struct {
+	PosBase
+	Cond Expr
+	Body *BlockStmt
+}
+
 // ReturnStmt return v
 type ReturnStmt struct {
 	PosBase
@@ -268,10 +330,21 @@ type ReturnStmt struct {
 }
 
 // AssignStmt a, b := expr
+//
+// 变体：复合赋值（a += b）
+//   - Compound = "+" / "-" / "*" / "/"
+//   - CompoundVar = 源变量名（a）
+//   - Rhs = 加法/减法等的右半部分
+//
+// 例：a += b  →  AssignStmt{Lhs:[a], Compound:"+", CompoundVar:"a", Rhs:b}
+//
+//	codegen 会原样 emit 成 "a += b"（Go 原生支持）
 type AssignStmt struct {
 	PosBase
-	Lhs []string
-	Rhs Expr
+	Lhs         []string
+	Rhs         Expr
+	Compound    string // "" 表示普通赋值；"+" / "-" / "*" / "/" 表示复合赋值
+	CompoundVar string // 复合赋值的源变量名（暂未用，保留）
 }
 
 // Connection 图连接：hello <out> stdio.Println
@@ -464,19 +537,23 @@ func (*EdgeDecl) declMarker()   {}
 func (*FuncDecl) nodeMarker() {}
 func (*FuncDecl) declMarker() {}
 
-func (*FieldDecl) nodeMarker()            {}
-func (*FieldDecl) structMemberMarker()    {}
-func (*VarDecl) nodeMarker()              {}
-func (*VarDecl) structMemberMarker()      {}
-func (*VarDecl) stmtMarker()              {}
-func (*FlowDecl) nodeMarker()             {}
-func (*FlowDecl) structMemberMarker()     {}
-func (*PortDecl) nodeMarker()             {}
-func (*PortDecl) structMemberMarker()     {}
-func (*InstanceDecl) nodeMarker()         {}
-func (*InstanceDecl) structMemberMarker() {}
-func (*EdgeConnDecl) nodeMarker()         {}
-func (*EdgeConnDecl) structMemberMarker() {}
+func (*FieldDecl) nodeMarker()               {}
+func (*FieldDecl) structMemberMarker()       {}
+func (*VarDecl) nodeMarker()                 {}
+func (*VarDecl) structMemberMarker()         {}
+func (*VarDecl) stmtMarker()                 {}
+func (*FlowDecl) nodeMarker()                {}
+func (*FlowDecl) structMemberMarker()        {}
+func (*PortDecl) nodeMarker()                {}
+func (*PortDecl) structMemberMarker()        {}
+func (*InstanceDecl) nodeMarker()            {}
+func (*InstanceDecl) structMemberMarker()    {}
+func (*EdgeConnDecl) nodeMarker()            {}
+func (*EdgeConnDecl) structMemberMarker()    {}
+func (*SubInstanceDecl) nodeMarker()         {}
+func (*SubInstanceDecl) structMemberMarker() {}
+func (*SubEdgeDecl) nodeMarker()             {}
+func (*SubEdgeDecl) structMemberMarker()     {}
 
 func (*TypeName) nodeMarker()  {}
 func (*TypeName) typeMarker()  {}
@@ -485,16 +562,26 @@ func (*TypeArray) typeMarker() {}
 func (*TypePtr) nodeMarker()   {}
 func (*TypePtr) typeMarker()   {}
 
-func (*BlockStmt) nodeMarker()  {}
-func (*BlockStmt) stmtMarker()  {}
-func (*IfStmt) nodeMarker()     {}
-func (*IfStmt) stmtMarker()     {}
-func (*ReturnStmt) nodeMarker() {}
-func (*ReturnStmt) stmtMarker() {}
-func (*AssignStmt) nodeMarker() {}
-func (*AssignStmt) stmtMarker() {}
-func (*Connection) nodeMarker() {}
-func (*Connection) stmtMarker() {}
+func (*BlockStmt) nodeMarker()          {}
+func (*BlockStmt) stmtMarker()          {}
+func (*BlockStmt) structMemberMarker()  {}
+func (*IfStmt) nodeMarker()             {}
+func (*IfStmt) stmtMarker()             {}
+func (*IfStmt) structMemberMarker()     {}
+func (*ForStmt) nodeMarker()            {}
+func (*ForStmt) stmtMarker()            {}
+func (*ForStmt) structMemberMarker()    {}
+func (*WhileStmt) nodeMarker()          {}
+func (*WhileStmt) stmtMarker()          {}
+func (*WhileStmt) structMemberMarker()  {}
+func (*ReturnStmt) nodeMarker()         {}
+func (*ReturnStmt) stmtMarker()         {}
+func (*ReturnStmt) structMemberMarker() {}
+func (*AssignStmt) nodeMarker()         {}
+func (*AssignStmt) stmtMarker()         {}
+func (*AssignStmt) structMemberMarker() {}
+func (*Connection) nodeMarker()         {}
+func (*Connection) stmtMarker()         {}
 
 func (*NodeRef) nodeMarker() {}
 func (*NodeRef) hopMarker()  {}

@@ -1548,3 +1548,150 @@ Parser 假定：
 > **下一步**：按 Day 1-2 开始写 `ast.go`，跑通 `go build`。然后按 Day 3 开始写 parser 框架。
 >
 > **两周后**，你就有了一个能解析所有 .mocker 文件的 parser。AST 是后面所有阶段的基础，**多花一天设计，省后面一月返工**。
+
+---
+
+## 附录 D：M4.5 节点 body 内的 sub-graph 语法
+
+### 设计动机
+
+M4.4 把拓扑集中在 main 节点 body，但实际写程序时，每个节点的 body 自包含地描述自己的 sub-graph 更自然：
+
+```ce
+hello {
+    h := "hello"
+    world w;             // sub-instance 声明
+    h <add_str> w        // sub-edge 连接
+    >> out_str           // port 声明
+    stdio.Println p;     // 外部 sub-instance 引用
+    out_str >> p.msg;    // 内部 flow
+}
+```
+
+M4.5 把这种语法纳入 parseStructMember，新增 2 种形式。
+
+### 节点 body 内的所有 StructMember 形式（M4.5）
+
+| 形式 | 例子 | AST 类型 |
+|------|------|---------|
+| 0 | `>> str hey` | `PortDecl`（入度） |
+| 1 | `str Domain` | `FieldDecl`（强类型字段） |
+| 1.5 | `str name = expr` | `VarDecl`（显式类型） |
+| 2 | `name := expr` | `VarDecl`（类型推断） |
+| 3 | `h / h >> / h>>msg` | `FlowDecl`（出度） |
+| **4** | `TypeName varName;` | **`SubInstanceDecl`**（M4.5 新增） |
+| **5** | `src <edge> dst` | **`SubEdgeDecl`**（M4.5 新增） |
+
+### 形式 4：SubInstanceDecl
+
+```ce
+TypeName varName;
+```
+
+- 例：`world w;`（在 hello body 内）
+- 例：`stdio.Println p;`
+- 与 `InstanceDecl`（main body 专用）的区别：
+  - `InstanceDecl`：main 节点 body，作为 entry
+  - `SubInstanceDecl`：任何节点 body，作为内部子实例
+
+### 形式 5：SubEdgeDecl
+
+```ce
+src <edge_name> dst
+```
+
+- 例：`h <add_str> w`（在 hello body 内）
+- 与 `EdgeConnDecl`（main body 专用）的区别：
+  - `EdgeConnDecl`：main body，作为入口拓扑
+  - `SubEdgeDecl`：任何节点 body，作为内部子图连接
+
+### 形式 3 扩展：FlowDecl 支持内部 flow
+
+```ce
+src                                // 裸出度（隐式 emit 到自己的 output）
+src >>                             // 显式出度
+src >> dst.attr;                    // 内部 flow 到 sub-instance 的 input（M4.5 扩展）
+```
+
+- 例：`out_str >> p.msg;`（在 hello body 内，p 是 sub-instance）
+- codegen 时把这种 flow 转成 `p.block0(out_str)`（调 sub-instance 的方法）
+
+### parseStructMember 的派发逻辑
+
+```go
+func parseStructMember() ast.StructMember {
+    tok := p.peek()
+
+    // 形式 0：>> 开头（入度声明）
+    if tok.Type == TypeOP_RRARROW { return p.parsePortDecl() }
+
+    // 形式 5（M4.5 新增）：SubEdgeDecl `src <edge> dst`
+    if tok.Type == TypeID && p.peekN(1).Type == TypeOP_LT {
+        return p.parseSubEdgeDecl()
+    }
+
+    // 形式 4（M4.5 新增）：SubInstanceDecl `TypeName varName;`
+    if tok.Type == TypeID && p.peekN(1).Type == TypeID {
+        return p.parseSubInstanceDecl()
+    }
+    // 跨包：`pkg.Node varName;`
+    if tok.Type == TypeCALL && p.peekN(1).Type == TypeID {
+        return p.parseSubInstanceDecl()
+    }
+
+    // 形式 1：typed field
+    if isTypeStart(tok.Type) && p.isTypedFieldStart() { ... }
+
+    // 形式 2：type-inferred VarDecl
+    if tok.Type == TypeID && p.peekN(1).Type == TypeOP_DEFINE { ... }
+
+    // 形式 3：FlowDecl
+    if tok.Type == TypeID { return p.parseFlowDecl() }
+
+    ...
+}
+```
+
+### 与 main body 的差异
+
+main body 用 `InstanceDecl` + `EdgeConnDecl`（同 main package 范围内的 instance 声明 + edge）
+节点 body 用 `SubInstanceDecl` + `SubEdgeDecl`（任意深度嵌套的 sub-graph）
+
+为什么用不同类型？**语义不同**：
+- `InstanceDecl` 是 entry 声明（main 用）
+- `SubInstanceDecl` 是嵌套子实例声明（递归用）
+
+### 完整例子（hello world）
+
+```ce
+hello {
+    h := "hello"
+    world w;
+    h <add_str> w
+    >> out_str
+    stdio.Println p;
+    out_str >> p.msg;
+}
+
+world {
+    >> str words
+    new := words + " world!"
+    new >>
+}
+
+<add_str> {
+    hello.h >> world.words
+    world.new >> hello.out_str
+}
+
+main {
+    hello happy;
+}
+```
+
+### 参考
+
+- `internal/parser/ast/ast.go` — `SubInstanceDecl` + `SubEdgeDecl` 定义
+- `internal/parser/parse_decl.go` — `parseStructMember` 派发
+- [constructor-orchestrator-design.md](../circle/docs/constructor-orchestrator-design.md) — 完整设计
+- [execution.md](../circle/docs/execution.md) — 整体执行流程

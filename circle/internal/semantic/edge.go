@@ -71,29 +71,111 @@ func AsyncBranchCount(edge *ast.EdgeDecl) int {
 // CheckEdgeBody 校验边的 body 里点对点连线的类型
 //
 // MVP 检查：
-//  1. FlowStmt 里的每步 target 是否是已知节点
-//  2. FlowStmt 的 src.port 和 dst.port 类型是否一致
-//  3. FlowFanout 的 src 和各分支的 target 类型
+//  1. 第一个 FlowStmt 严格校验 src/dst（必须是 edge.Src / edge.Dst）
+//  2. 第一个 FlowStmt 的 src.port 和 dst.port 类型一致
+//  3. 后续 FlowStmt（内部 routing / 返回路径）仅做宽松校验
+//  4. FlowFanout 的 src 和各分支的 target 类型
 func CheckEdgeBody(edge *ast.EdgeDecl, table *SymbolTable) []SemanticError {
 	var errs []SemanticError
+	firstFlow := true
 	for _, stmt := range edge.Body {
 		switch s := stmt.(type) {
 		case *ast.FlowStmt:
-			errs = append(errs, checkFlowStmt(s, edge, table)...)
+			if firstFlow {
+				errs = append(errs, checkFlowStmt(s, edge, table)...)
+				firstFlow = false
+			} else {
+				// 后续 FlowStmt：内部 routing，不强制匹配 edge.Src/Dst
+				errs = append(errs, checkFlowStmtInternal(s, edge, table)...)
+			}
 		case *ast.FlowCont:
 			// FlowCont 是 FlowStmt 的续行形式，单独不会出现在边 body 里
 			//（边 body 是 stmt 列表）。保守跳过。
 			_ = s
 		case *ast.FlowFanout:
 			errs = append(errs, checkFlowFanout(s, edge, table)...)
+			firstFlow = false
 		}
 	}
 	return errs
 }
 
-// checkFlowStmt 校验链式 FlowStmt
+// checkFlowStmtInternal 宽松校验后续 FlowStmt（内部 routing）
 //
-// 边 body 的 FlowStmt 约定：2 步，`src.x >> dst.y`。
+// 后续 FlowStmt 用于 sync edge 内部的返回值路径
+// （如 `world.new >> hello.out_str`），它们的 src/dst 不一定等于 edge.Src/Dst。
+// 这里只校验 in/out 存在性和类型匹配。
+func checkFlowStmtInternal(stmt *ast.FlowStmt, edge *ast.EdgeDecl, table *SymbolTable) []SemanticError {
+	var errs []SemanticError
+	if len(stmt.Steps) < 2 {
+		return errs
+	}
+
+	first := stmt.Steps[0].Target
+	last := stmt.Steps[len(stmt.Steps)-1].Target
+
+	firstNode, firstAttr, firstOK := extractPortName(first)
+	lastNode, lastAttr, lastOK := extractPortName(last)
+	if !firstOK || !lastOK {
+		return errs
+	}
+
+	// 校验 firstAttr 是 firstNode 的 in/out（不做 cross-pkg 严格匹配，
+	// 后续 FlowStmt 可能是跨包引用）
+	if !IsReservedNode(firstNode) && firstNode != "" && firstAttr != "" {
+		if _, _, ok := table.GetExport(firstNode, firstAttr); !ok {
+			if !lookupCrossExport(firstNode, firstAttr, table) {
+				errs = append(errs, SemanticError{
+					Pos:  first.Pos(),
+					Msg:  fmt.Sprintf("edge %s body: %q has no in/out on node %q", edgeKey(edge), firstAttr, firstNode),
+					Hint: fmt.Sprintf("declare `%s >>` (out) in %s", firstAttr, firstNode),
+				})
+			}
+		}
+	}
+
+	if !IsReservedNode(lastNode) && lastNode != "" && lastAttr != "" {
+		if _, _, ok := table.GetExport(lastNode, lastAttr); !ok {
+			if !lookupCrossExport(lastNode, lastAttr, table) {
+				errs = append(errs, SemanticError{
+					Pos:  last.Pos(),
+					Msg:  fmt.Sprintf("edge %s body: %q has no in/out on node %q", edgeKey(edge), lastAttr, lastNode),
+					Hint: fmt.Sprintf("declare `>> type %s` (in) or `%s >>` (out) in %s", lastAttr, lastAttr, lastNode),
+				})
+			}
+		}
+	}
+
+	// 类型一致性
+	srcType := table.LookupExportType(firstNode, firstAttr)
+	dstType := table.LookupExportType(lastNode, lastAttr)
+	if srcType != TypeUnknown && dstType != TypeUnknown && srcType != dstType {
+		errs = append(errs, SemanticError{
+			Pos: first.Pos(),
+			Msg: fmt.Sprintf("edge %s body: type mismatch %s.%s (%s) → %s.%s (%s)",
+				edgeKey(edge), firstNode, firstAttr, srcType, lastNode, lastAttr, dstType),
+			Hint: "in/out types must match for direct connection",
+		})
+	}
+	return errs
+}
+
+// lookupCrossExport 跨包查 in/out（宽松检查用）
+func lookupCrossExport(nodeName, attrName string, table *SymbolTable) bool {
+	if idx := strings.LastIndex(nodeName, "."); idx > 0 {
+		n := nodeName[idx+1:]
+		if in, isOut, ok := table.GetExport(n, attrName); ok && in != nil {
+			return ok
+		} else if isOut {
+			return true
+		}
+	}
+	return false
+}
+
+// checkFlowStmt 严格校验第一个 FlowStmt（边接口）
+//
+// 第一个 FlowStmt 约定：2 步，`src.x >> dst.y`。
 //   - 第 1 步在 src 节点的 in/out 里
 //   - 第 2 步在 dst 节点的 in/out 里
 //   - 两步的 in/out 类型应该一致
@@ -245,16 +327,16 @@ func edgeKey(e *ast.EdgeDecl) string {
 //
 // 调用时机：在解析完 EdgeDecl 之后，跑语义检查之前
 //
-// 规则：
+// 规则（M4.5 更新）：
 //   - Style1：edge.Src 和 edge.Dst 都已显式指定 → 不动
 //   - Style2：edge.Src 或 edge.Dst 为空 → 扫描 body 推导
-//   - FlowStmt / FlowCont：first step 的前缀 = src, last step 的前缀 = dst
+//   - 只看**第一个 FlowStmt**的 first/last step（sync edge 常见模式：第一个 stmt 描述
+//     边接口，后续 stmt 描述内部 routing / 返回值路径）
 //   - FlowFanout：src 已知（FlowFanout.Src 的前缀），但多个分支 → 不支持 Style2，报错
 //
 // 限制（违反时返回 SemanticError）：
-//   - body 必须有唯一 src 和唯一 dst
+//   - 第一个 FlowStmt 必须有唯一 src 和唯一 dst
 //   - 不支持 fanout（多个 dst）
-//   - 不支持 multi-source（多个 src）
 //
 // 推导成功后填回 edge.Src / edge.Dst
 func InferEdgeEndpoints(edge *ast.EdgeDecl) []SemanticError {
@@ -263,44 +345,55 @@ func InferEdgeEndpoints(edge *ast.EdgeDecl) []SemanticError {
 		return nil
 	}
 
+	// 只看第一个 FlowStmt / FlowFanout（M4.5：sync edge 常见模式：第一个 stmt
+	// 描述接口（call → callee），后续 stmt 描述内部 routing / 返回值）。
+	// 简单情形（单 FlowStmt）行为和旧版一致。
+	var primary ast.Stmt
+	for _, s := range edge.Body {
+		switch s.(type) {
+		case *ast.FlowStmt, *ast.FlowFanout:
+			primary = s
+			break
+		}
+		if primary != nil {
+			break
+		}
+	}
+	if primary == nil {
+		// 兜底：整个 body 没有 FlowStmt / FlowFanout（全是 FlowCont 等）
+		// 这种情况下用第一个 stmt 试着推
+		if len(edge.Body) == 0 {
+			return nil
+		}
+		primary = edge.Body[0]
+	}
+
 	srcs := map[string]bool{}
 	dsts := map[string]bool{}
 
-	for _, stmt := range edge.Body {
-		switch s := stmt.(type) {
-		case *ast.FlowStmt:
-			if len(s.Steps) < 2 {
-				continue
-			}
-			// first step → src; last step → dst
-			first := s.Steps[0].Target
-			last := s.Steps[len(s.Steps)-1].Target
-
-			if srcPrefix, ok := extractNodePrefix(first); ok {
-				srcs[srcPrefix] = true
-			}
-			if dstPrefix, ok := extractNodePrefix(last); ok {
-				dsts[dstPrefix] = true
-			}
-
-		case *ast.FlowCont:
-			if len(s.Steps) == 0 {
-				continue
-			}
-			// FlowCont 的 src 来自前面的 stmt，这里只取 dst
-			last := s.Steps[len(s.Steps)-1].Target
-			if dstPrefix, ok := extractNodePrefix(last); ok {
-				dsts[dstPrefix] = true
-			}
-
-		case *ast.FlowFanout:
-			// Fanout 不支持 Style2（多个 dst）
-			return []SemanticError{{
-				Pos:  s.Pos(),
-				Msg:  fmt.Sprintf("edge %s Style 2 语法糖不支持 fan-out（多个 dst）", edgeNameForSugar(edge)),
-				Hint: "用 Style 1: src <edge> dst { ... } 显式指明 src/dst",
-			}}
+	switch s := primary.(type) {
+	case *ast.FlowStmt:
+		if len(s.Steps) < 2 {
+			return nil
 		}
+		// first step → src; last step → dst
+		first := s.Steps[0].Target
+		last := s.Steps[len(s.Steps)-1].Target
+
+		if srcPrefix, ok := extractNodePrefix(first); ok {
+			srcs[srcPrefix] = true
+		}
+		if dstPrefix, ok := extractNodePrefix(last); ok {
+			dsts[dstPrefix] = true
+		}
+
+	case *ast.FlowFanout:
+		// Fanout 不支持 Style2（多个 dst）
+		return []SemanticError{{
+			Pos:  s.Pos(),
+			Msg:  fmt.Sprintf("edge %s Style 2 语法糖不支持 fan-out（多个 dst）", edgeNameForSugar(edge)),
+			Hint: "用 Style 1: src <edge> dst { ... } 显式指明 src/dst",
+		}}
 	}
 
 	// 校验：单一 src + 单一 dst

@@ -13,6 +13,8 @@
 package ir
 
 import (
+	"strings"
+
 	"circle/internal/parser/ast"
 )
 
@@ -67,6 +69,7 @@ type EdgeKey struct {
 //   - AutoExec 标记无入度的 block（启动时直接跑）
 type IRNode struct {
 	Name     string
+	Pkg      string // 所属包名（用于 codegen/d2gen 等需要 qualified 名字的地方）
 	Kind     NodeKind // NodeKindNode / NodeKindEdge / NodeKindPlain
 	Exported bool     // @ 前缀（包外可见）
 
@@ -86,8 +89,60 @@ type IRNode struct {
 	UsedBlocks   []int    // topology 引用到的 block 索引（用于裁减）
 	ReferencedBy []string // 被哪些边引用（优化用）
 
+	// M4.5：节点 body 内的 sub-graph（构造函数编排器）
+	//   SubInstances: 节点 body 内嵌的子实例（world w, stdio.Println p）
+	//   SubEdges:     sub-instance 之间的边（h <add_str> w）
+	//   SubFlows:     内部 flow 到 sub-instance 的 input（out_str >> p.msg）
+	SubInstances []*IRSubInstance // {TypeName, InstanceName}
+	SubEdges     []*IRSubEdge     // {SrcAttr, EdgeName, DstInstance, DstAttr}
+	SubFlows     []*IRSubFlow     // {SrcAttr, DstInstance, DstAttr}
+
 	// 源位置（debug / 错误信息用）
 	Pos ast.Pos
+}
+
+// PkgName 返回节点所属包名（带 fallback）
+func (n *IRNode) PkgName() string {
+	if n.Pkg != "" {
+		return n.Pkg
+	}
+	return "main"
+}
+
+// IRSubInstance（M4.5）— 节点 body 内的子实例
+type IRSubInstance struct {
+	TypeName     string // 节点类型名（"world" / "stdio.Println"）
+	InstanceName string // 实例名（"w" / "p"）
+}
+
+// IRSubEdge（M4.5）— sub-instance 之间的 sub-edge 连接
+//
+// 语义：节点 body 内的 `srcAttr <edge_name> dstInstance`：
+//   - SrcAttr: caller 的属性（caller 的 state field / 输入 port 等）作为边调用的输入
+//   - EdgeName: 边名（顶层 EdgeDecl 的 Edge）
+//   - DstInstance: 被调的 sub-instance（如 "w" / "p"）
+//   - DstAttr: 被调 instance 的入 port 名（顶层 edge body 第一个 FlowStmt 推断）
+//   - RetAttr: caller 上接收返回值的属性名（顶层 edge body 后续 FlowStmt 推断）
+//
+// 例：hello { h <add_str> w }，top-level edge `<add_str>` body:
+//   hello.h >> world.words
+//   world.new >> hello.out_str
+// → IRSubEdge{SrcAttr:"h", EdgeName:"add_str", DstInstance:"w", DstAttr:"words", RetAttr:"out_str"}
+//
+// codegen 会生成：`out_str := w.add_str_hello(hello_instance.h)`
+type IRSubEdge struct {
+	SrcAttr     string // 源属性名（"h" / "out_str"）
+	EdgeName    string // 边名
+	DstInstance string // 目标实例名
+	DstAttr     string // 目标属性名（callee 的入 port 名）
+	RetAttr     string // 返回值赋给的属性名（caller 上的 port / 局部变量名）
+}
+
+// IRSubFlow（M4.5）— 节点 body 内的内部 flow
+type IRSubFlow struct {
+	SrcAttr     string // 源属性名
+	DstInstance string // 目标 sub-instance 名
+	DstAttr     string // 目标 input 端口名
 }
 
 // IRInput 一个入度（>> type name）
@@ -263,11 +318,23 @@ func (k FlowOpKind) String() string {
 //     - 用于 codegen 时用 instance 名构造节点（如 `happy := Newhello()`）
 //   - 这两条信息决定 codegen 怎么生成代码
 type IRTopology struct {
-	Edges        []EdgeKey
-	StartNodes   []string          // 程序启动时要主动跑的节点（main 包专属）
-	AllNodes     []string          // 拓扑里出现过的所有节点（去重）
-	VarInstances map[string]string // instance name → type name
-	Pos          ast.Pos
+	Edges         []EdgeKey
+	StartNodes    []string          // 程序启动时要主动跑的节点（main 包专属）
+	AllNodes      []string          // 拓扑里出现过的所有节点（去重）
+	VarInstances  map[string]string // instance name → type name
+	InstanceEdges []InstanceEdge    // main 节点 body 里的边（instance-level）
+	Pos           ast.Pos
+}
+
+// InstanceEdge main 节点 body 里的边（instance-level）
+//
+// 和 EdgeKey 不同：EdgeKey 是 type-level（"hello" <out> "Println"），
+// InstanceEdge 是 instance-level（"happy" <out> "p"），由 EdgeConnDecl 直接产生。
+// 用于 codegen 的"构造函数编排器"模式：知道 happy 应该调 p.block0()。
+type InstanceEdge struct {
+	SrcInstance string // 源实例名（如 "happy"）
+	Edge        string // 边名（如 "out"）
+	DstInstance string // 目标实例名（如 "p"）
 }
 
 // ──── 语句 IR ────
@@ -439,12 +506,44 @@ func (p *IRProgram) AllTopologies() map[string]*IRTopology {
 }
 
 // FindNode 跨包查节点
+// FindNode 通过 (pkg, node) 查找节点
 func (p *IRProgram) FindNode(pkgName, nodeName string) *IRNode {
 	pkg, ok := p.Packages[pkgName]
 	if !ok {
 		return nil
 	}
 	return pkg.Nodes[nodeName]
+}
+
+// FindNodeByName 仅用名字查找节点（先 strip pkg 前缀，再查所有包）
+//
+// 用于处理 typeName 可能是 "io.write" 或 "write" 的情况
+func (p *IRProgram) FindNodeByName(typeName string) *IRNode {
+	short := typeName
+	if idx := strings.LastIndex(typeName, "."); idx >= 0 {
+		short = typeName[idx+1:]
+	}
+	for _, pkg := range p.Packages {
+		if n, ok := pkg.Nodes[short]; ok {
+			return n
+		}
+		// 也用完整 typeName 查（万一类型名带 pkg 前缀）
+		if n, ok := pkg.Nodes[typeName]; ok {
+			return n
+		}
+	}
+	return nil
+}
+
+// AllNodes 返回所有包的所有节点（用 map 去重，按 node name）
+func (p *IRProgram) AllNodes() map[string]*IRNode {
+	out := map[string]*IRNode{}
+	for _, pkg := range p.Packages {
+		for name, n := range pkg.Nodes {
+			out[name] = n
+		}
+	}
+	return out
 }
 
 // ──── 拓扑分析（pruning / auto-exec 计算）────
@@ -599,7 +698,22 @@ func (p *IRProgram) AnalyzeTopology() {
 			}
 		}
 		if !changed {
-			break
+		break
+	}
+}
+
+	// 4. M4.5 兜底：构造函数编排器模式需要所有 block 都是 USED
+	//   旧设计：channel-based，按 topology.Edges 引用关系裁剪
+	//   新设计：每个 block 是 method，由构造器显式调用，所有 block 都应该被 emit
+	//   这里对所有节点遍历，把 IsUsed==false 的 block 都 mark 为 USED
+	for _, pkg := range p.Packages {
+		for _, node := range pkg.Nodes {
+			for i, blk := range node.Blocks {
+				if !blk.IsUsed {
+					node.Blocks[i].IsUsed = true
+					node.UsedBlocks = append(node.UsedBlocks, i)
+				}
+			}
 		}
 	}
 

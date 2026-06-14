@@ -574,9 +574,24 @@ main {
 - 边定义（带 body）——边 body 是"运行时的走线"，不是启动结构
 - 函数声明——入口是拓扑，不是函数
 
-#### 3.5.7 自举意义
+#### 3.5.6 块体里写什么
 
-`main` 约定的最大价值在**自举**：
+`main { ... }` 块体接受**和拓扑块同一种语法**——每行一条 `src <edge_name> dst` 形式的边引用，分号 `;` 可选：
+
+```ce
+main {
+    hello <out> say
+    hello <debug> say       // 同一对节点可以有多条边
+    say <to_stdout> stdio.Println
+}
+```
+
+**禁止的语法**（这些都不是启动时要建的边）：
+- 节点声明（`name { ... }`）——节点要么从其他文件 import，要么通过包内拓扑建
+- 边定义（带 body）——边 body 是"运行时的走线"，不是启动结构
+- 函数声明——入口是拓扑，不是函数
+
+#### 3.5.7 自举意义
 
 ```
 compiler/main.ce        ← Mocker 编译器自己的入口
@@ -599,6 +614,50 @@ compiler/main.ce        ← Mocker 编译器自己的入口
 | `main` | 入口保留名 | 走 TopologyDecl |
 
 未来可能会加更多 reserved name（比如 `init` 用于"在 main 之前执行的初始化"），但当前只要 `main` 一个。
+
+### 3.5.8 M4.5 简化：main 节点极简化（只声明 entry）
+
+> **M4.5 更新**：去掉 main 节点作为"完整入口拓扑"的概念。
+
+**M4.4 之前**：
+```ce
+main {
+    hello happy
+    stdio.Println p
+    happy <out> p
+}
+```
+
+**M4.5 新设计**：
+```ce
+main {
+    hello happy;   // 只声明 entry instance
+}
+```
+
+所有跨实例的边连接、各实例的创建顺序，都下放到**每个节点自己的 body**：
+
+```ce
+hello {
+    h := "hello"
+    world w;             // hello 内部：声明 world 实例
+    h <add_str> w        // hello 内部：h → w 边
+    >> out_str
+    stdio.Println p;     // hello 内部：声明 Println 实例
+    out_str >> p.msg;    // hello 内部：out_str → p.msg flow
+}
+```
+
+**原理**：每个节点的 `NewXxx()` 是它自己子图的"编译器"。构造时递归创建子实例 + 调子实例方法。
+
+`main()` 只调 entry：
+```go
+func main() {
+    _ = Newhello()  // hello 的 NewXxx() 内部递归构造 world 和 Println
+}
+```
+
+详见 [constructor-orchestrator-design.md](../circle/docs/constructor-orchestrator-design.md) 和 [execution.md](../circle/docs/execution.md)。
 
 ### 3.6 语法糖：节点体内的端口直转发
 
