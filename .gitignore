@@ -1,3 +1,8 @@
 release/
 out/
 debug/
+cache/
+tmp/
+dist
+node_modules
+mymock

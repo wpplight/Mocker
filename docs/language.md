@@ -6,9 +6,9 @@
 > 设计目标：**严谨、可自举（self-hosting）**
 >
 > 配套文档：
-> - [Mocker架构设计.md](./Mocker架构设计.md) — 整体架构 / 流水线
-> - [parser.md](./parser.md) — Parser 实现细节
 > - [circle/docs/ast_design.md](../circle/docs/ast_design.md) — AST 节点设计
+> - [circle/docs/execution.md](../circle/docs/execution.md) — 执行文档（构造函数编排器）
+> - [ir-design.md](./ir-design.md) — IR 设计文档
 
 ---
 
@@ -16,8 +16,8 @@
 
 1. [设计哲学](#一设计哲学)
 2. [文件 / 包 / 模块](#二文件--包--模块)
-3. [三大第一公民：节点 / 边 / 拓扑块](#三三大第一公民节点--边--拓扑块)
-   - 3.5 [入口保留名 `main`](#35-入口保留名main既是包名又是拓扑块) ⭐
+3. [两大第一公民：节点 / 边](#三大第一公民节点--边)
+   - 3.5 [入口保留名 `main`](#35-入口保留名main既是包名又是入口节点) ⭐
    - 3.6 [语法糖：节点体内的端口直转发](#36-语法糖节点体内的端口直转发) ⭐
 4. [数据流：单链 / 续行 / 并发扇出](#四数据流单链--续行--并发扇出)
 5. [函数 / 枚举 / 类型 / 表达式](#五函数--枚举--类型--表达式)
@@ -35,17 +35,27 @@
 
 ### 1.1 三句话
 
-1. **非过程化**：节点只声明接口，边只描述连线，拓扑块只声明图骨架 —— **没有"先做 A 再做 B"的过程语义**。
+1. **非过程化**：节点只声明接口，边只描述点对点数据流，节点 body 内的 sub-graph 表达"包内怎么连" —— **没有"先做 A 再做 B"的过程语义**。
 2. **图形化（Graph-oriented）**：程序的本质是有向图（节点 + 边），运行时是数据沿图流动。
 3. **自举优先**：所有语义都必须在 `.ce` 自己内部能完整表达，包括 stdio / io / sysio 三个 runtime 层。
 
-### 1.2 三层职责严格分离
+### 1.2 两类构造 + 三层职责严格分离
 
-| 层 | 角色 | 谁写 |
+| 构造 | 角色 | 谁写 |
 | --- | --- | --- |
-| **节点（Node）** | 纯接口声明（端口、出入符号） | stdio / io / sysio 包作者 |
-| **边（Edge）** | 边内的点对点数据流实现（含 body） | 同上 |
-| **拓扑块（Topology）** | 包的图结构索引，**无 body** | 同上 |
+| **节点（Node）** | 接口声明 + 自带 sub-graph（含 body 内的 sub-instance / sub-edge / 控制流） | stdio / io / sysio 包作者 |
+| **边（Edge）** | 节点之间的点对点数据流实现（含 body） | 同上 |
+
+| 层 | 角色 |
+| --- | --- |
+| **节点（Node）** | 纯接口声明 + body 内 sub-graph |
+| **边（Edge）** | 节点间的点对点数据流 |
+
+| 运行时层 | 包 | 说明 |
+| --- | --- | --- |
+| `stdio` | 用户接口 | 节点 / 边齐全 |
+| `io` | 文件描述符抽象 | 节点 / 边齐全 |
+| `sysio` | 编译终点 | 节点骨架（body 由编译器接管） |
 
 > **不能混**：节点体里写"过程性"控制流（if / for）、边体里写"声明性"东西 —— 各自有各自的位置。
 
@@ -92,9 +102,15 @@ import <pkgname>
 
 ---
 
-## 三、Mocker 的核心抽象
+## 三、两大第一公民：节点 / 边
 
-> 这是 Mocker 与一般命令式语言最大的区别 —— **图是第一公民**。
+> 这是 Mocker 与一般命令式语言最大的区别 —— **图是第一公民**，但只有**两种**第一公民：**节点（Node）** 和 **边（Edge）**。
+>
+> 历史上曾经设想的"拓扑块"（`stdio { ... }`、`io { ... }`）已经在 M4.5 简化掉，**整套语言里没有第三个第一公民**：
+> - **节点** = 自带 sub-graph 的对象（body 里可以内嵌 sub-instance + sub-edge）
+> - **边** = 在节点之间搬运数据的连接
+> - **包内的"图怎么连"通过节点的 sub-graph 表达**，不需要单独的拓扑块
+> - **main 包** 用一个特殊的入口节点（也叫 `main`）来声明 entry 实例，其他什么都不用写
 
 ### 3.0 Block 模型（底层图结构）
 
@@ -127,7 +143,7 @@ a=0 的 block = auto-exec（创建 node 时跑一次）
 | `EXIT` | 进程退出 | `os.Exit(code)`（规划中）|
 | `ALLOC` | 内存分配 | `make([]byte, size)`（规划中）|
 
-**使用方式**：通过**保留边**（保留名 `<syscall>` 等）+ 保留节点（`SYSCALL`）的组合：
+**使用方式**：在顶层 `EdgeDecl` 的 dst 上写 `SYSCALL` 即可（保留节点天然就是边的一端）：
 
 ```ce
 @write {
@@ -135,11 +151,9 @@ a=0 的 block = auto-exec（创建 node 时跑一次）
     >> str data
 }
 
-io {
-    write <syscall> SYSCALL {
-        write.fid >> SYSCALL.fid
-        write.data >> SYSCALL.data
-    }
+io.write <syscall> SYSCALL {
+    io.write.fid >> SYSCALL.fid
+    io.write.data >> SYSCALL.data
 }
 ```
 
@@ -192,63 +206,53 @@ Println <write> io.write {
 
 **编译器判定**：`InferEdgeEndpoints` 在解析后扫描 body 收集前缀集合，校验唯一性后填回 edge.Src / edge.Dst。
 
-#### 3.0.4 每个包都有自己的 Topology
+#### 3.0.4 sub-graph：节点 body 自带"内部连线"（取代拓扑块的角色）
 
-**Topology（拓扑块）= 每个包都可以有**（不只 main）：
+**M4.5 起，节点 body 自带 sub-graph**，承担了原先"拓扑块"的职责。这是 Mocker 语言的**核心机制**——通过在节点 body 里直接声明子实例、子边和内部 flow，表达"包内数据怎么路由"，不需要单独的拓扑块。
 
-| 包类型 | Topology 含义 |
-| --- | --- |
-| `main` 包 | **启动序列**（程序从哪里开始跑）|
-| 其他包 | **内部路由**（包内数据怎么流向其他节点）|
+**三种 sub-graph 成员**（节点 body 内）：
 
-例：stdio 包有内部拓扑，告诉编译器"stdio 包内，Println 收到的数据应该路由给 io.write"：
+| 成员 | 语法 | 含义 |
+| --- | --- | --- |
+| SubInstanceDecl | `world w;` | 声明一个子实例 |
+| SubEdgeDecl | `h <add_str> w` 或 `<add_str> w` | 在子实例之间连边（显式/隐式源） |
+| FlowDecl（内部） | `out_str >> p.msg;` | 把本节点的字段/出度喂给子实例的入端口 |
+
+**完整示例**（来自 `example/main.ce`，展示 hello 节点如何自包含一个子图）：
 
 ```ce
-package stdio
+hello {
+    h := "hello"             // 局部变量（auto-exec block 的输出）
+    world w                  // SubInstanceDecl：声明子实例 w（类型 world）
+    <add_str> w              // SubEdgeDecl（隐式源）：编译器推断 h → w
 
-@Println { ... }
-
-stdio {
-    Println <write> io.write
+    >>str out_str            // 入端口：接收 world 计算结果
+    stdio.Println p          // SubInstanceDecl：跨包子实例
+    out_str >> p.msg         // FlowDecl（内部）：out_str → p.msg
 }
 ```
 
-**编译器对两种拓扑的处理一致**：填 UsedBlocks + 算 AutoExecNodes + emit 内部 wiring 代码。
+> **对比旧拓扑块（已删除）**：以前 `stdio { Println <write> io.write }` 是单独一行拓扑声明；现在每个节点在自己 body 里直接写出"我依赖哪些子实例、怎么连"。这保证了每个节点是**自描述的**——不需要外部拓扑块来"组装"。
 
-#### 3.0.5 拓扑块内的 inline edge（一次性使用边）
+这些 sub-graph 成员由 IR 阶段的 `IRSubInstance` / `IRSubEdge` / `IRSubFlow` 承担，最终在 codegen 里通过"构造函数编排器"模式递归构造子实例、调用子方法。
 
-拓扑块里的 edge 可以带 body，形成**一次性使用边**（语法糖）：
+详见：[constructor-orchestrator-design.md](file:///home/wpp/homework/Mocker/circle/docs/constructor-orchestrator-design.md) 和 [execution.md](file:///home/wpp/homework/Mocker/circle/docs/execution.md)。
 
-```ce
-io {
-    write <syscall> SYSCALL {
-        write.fid >> SYSCALL.fid
-        write.data >> SYSCALL.data
-    }
-}
-```
-
-对比 top-level EdgeDecl + 拓扑引用：
-- top-level EdgeDecl + 拓扑无 body = "复用边"
-- 拓扑内 inline body = "一次性边"（不用另起定义）
-
-编译器判定：`entry.Body` 长度 == 0 才查 top-level EdgeDecl；> 0 = inline 边，跳过查。
-
-#### 3.0.6 多文件同包共享变量
+#### 3.0.5 多文件同包共享变量
 
 **同一个文件夹内的多个 .ce 文件可以使用同一个 package 名**：
 
 ```
 stdio/
-├── stdio.ce       // package stdio, @Println, edge <write> io.write
+├── stdio.ce       // package stdio, @Println
 └── to_string.ce   // package stdio, @to_string
 ```
 
 - 这些文件 **共享一个 SymbolTable**
-- 变量 / 节点 / 边都共享
+- 节点 / 边 / 子实例都共享
 - **跨文件夹同名 = 错误**（避免歧义）
 
-#### 3.0.7 `:=` vs `=` 严格区分
+#### 3.0.6 `:=` vs `=` 严格区分
 
 | 符号 | 语义 | 用法 | 类型来源 |
 | --- | --- | --- | --- |
@@ -259,7 +263,14 @@ stdio/
 - `type name := expr` ← 混搭，禁止
 - `name = expr` ← 无显式类型却用 `=`，禁止
 
-#### 3.0.8 类型推导 + 隐式初始化检查（roadmap #3 + #5）
+**例**：
+```ce
+msg := "hello"        // 推断 msg 是 str
+num fid = 1            // 显式 num
+data := msg + "\n"     // 推断 data 是 str（msg + str 字面量）
+```
+
+#### 3.0.7 类型推导 + 隐式初始化检查
 
 Mocker 节点体里的表达式经过**类型推导**和**隐式初始化检查**：
 
@@ -307,25 +318,11 @@ data := msg + 999      // ❌ "cannot use str + num"
 - `FlowDecl`（`name >>`）
 - `FieldDecl`（`type name`）
 - `PortDecl`（`>> type name`）
+- `SubInstanceDecl` / `SubEdgeDecl`（节点 body 内 sub-graph）
 
 **检查时机**：在 `CheckAll` / `Check` 的步骤 3b（节点 body 检查阶段）跑，先 `ResolveNodeBody` 收集所有 decl，再 `CheckNodeBody` 走 expression。
 
 **对应实现**：[`internal/semantic/infer.go`](file:///home/wpp/homework/Mocker/circle/internal/semantic/infer.go)
-| `:=` | **类型推断**（Go 风格）| `name := expr` | 从 expr 推论 |
-| `=`  | **显式类型** | `type name = expr` | 用户写明 |
-
-**错误组合（parser 拒绝）**：
-- `type name := expr` ← 混搭，禁止
-- `name = expr` ← 无显式类型却用 `=`，禁止
-
-**例**：
-```ce
-msg := "hello"        // 推断 msg 是 str
-num fid = 1            // 显式 num
-data := msg + "\n"     // 推断 data 是 str（msg + str 字面量）
-```
-
-这是 Go 风格 `:=` 的扩展：类型推断 vs 显式声明分两个符号，互不通用。
 
 ### 3.1 节点（Node）
 
@@ -354,20 +351,42 @@ data := msg + "\n"     // 推断 data 是 str（msg + str 字面量）
 | `<name> := <default>` | 带默认值的出符号 | `fid := 1` |
 | `<name> >>` | 标为出符号 | `fid >>` |
 | `<expr> >>` | 表达式流出（编译期算） | `msg + nl >>` |
+| `<type> <name>` | 类型字段 | `str name` |
+| `<Type> <name>;` | **sub-instance** 声明 | `world w;` / `stdio.Println p;` |
+| `<src> <edge> <dst>` | **sub-edge** 声明 | `h <add_str> w` |
+| `<edge> <dst>` | 隐式 sub-edge（推断源） | `<add_str> w` |
+| `<name> >> <target>` | 内部 flow（喂给 sub-instance 的入端口） | `out_str >> p.msg` |
+| `for(...) { ... }` | for 循环 | `for(i:=0; i<3; i++) { ... }` |
+| `while(...) { ... }` | while 循环 | `while(x > 0) { ... }` |
+| `if ... { ... }` | 条件语句 | `if x > 0 { ... } else { ... }` |
+| `<name> += <expr>` | 复合赋值 | `new += " world!"` |
+| `<name>++` / `<name>--` | 自增自减 | `i++` |
 
-#### 3.1.3 例子
+> 注：上面带 **sub-instance / sub-edge / 内部 flow** 的 3 行是 M4.5 新增；其他行（端口、变量、字段、控制流）在所有节点 body 里通用。
+
+#### 3.1.3 例子（带 sub-graph）
 
 ```ce
 @Println {
     >> str msg            // 入符号：要打印的字符串
-    fid  := 1             // 出符号：fd，默认 1（stdout）
+    fid  := 1             // 局部变量：fd，默认 1（stdout）
     nl   := "\n"          // 局部常量
     msg+nl >>             // 出符号：编译期拼接 msg + 换行
     fid >>                // 出符号：fd
 }
+
+hello {
+    h := "hello"
+    world w;                  // sub-instance
+    <add_str> w               // sub-edge（隐式源 h）
+
+    >>str out_str
+    stdio.Println p;          // sub-instance（跨包）
+    out_str >> p.msg;         // 内部 flow：hello.out_str 喂给 p.msg
+}
 ```
 
-> 节点体**不含**控制流（`if` / `for` / `while`），过程性逻辑一律下沉到边体或 runtime。
+> 节点体支持控制流（`if` / `for` / `while` / 复合赋值 / 数学表达式），这些在 codegen 阶段直接转译为 Go 代码。
 
 ### 3.2 边（Edge）
 
@@ -379,7 +398,7 @@ data := msg + "\n"     // 推断 data 是 str（msg + str 字面量）
 }
 ```
 
-- `src` / `dst`：节点名（IDENT / CALL）
+- `src` / `dst`：节点名（IDENT / CALL，可带 pkg 前缀如 `io.write`）
 - `edge_name`：边名（IDENT / EDGE_NAME / CALL，可含 `-`）
 - `body`：边内的点对点数据流
 
@@ -399,79 +418,62 @@ Println <write> io.write {
 ```
 
 > **边体 ≠ 节点体**：边体只描述"这条边内部数据怎么走"，不引入新节点、不定义新端口。
+>
+> 边体 ≠ 节点体里的 sub-edge body：sub-edge 复用了顶层 EdgeDecl（按 `(edge_name)` 查表），所以两边 body 写法一致。
 
-### 3.3 拓扑块（Topology Block）
+### 3.3 入口节点 `main`（不是拓扑块）
 
-#### 3.3.1 语法
+**M4.5 起取消了"拓扑块"概念**。原先 `stdio { ... }` / `io { ... }` 这种"块名 == 包名"的特殊结构体已不存在——编译器从每个包里的 `main` 节点 body（仅 main 包）自动推导 entry instance，**包的内部图则通过各节点自己的 sub-graph 表达**。
 
-```ce
-<PkgName> {        ← 块名必须 == 当前 package 名
-    <EdgeRef>*
-}
-```
-
-`EdgeRef` = `src <edge_name> dst`（**复用 edge 语法，但无 body**）。
-
-#### 3.3.2 例子
+`main` 节点是**特殊的入口节点**，body 里只放 **InstanceDecl**（声明 entry 实例）和 **EdgeConnDecl**（在实例之间连边）：
 
 ```ce
-package stdio
+package main
+import stdio
 
-@Println { ... }
-
-Println <write> io.write {        // ← 边定义（结构 + 行为）
-    Println.fid  >> io.write.fid
-    Println.data >> io.write.data
+hello {
+    // ... 节点 body，可含 sub-instance / sub-edge / flow / 控制流
 }
 
-stdio {                           // ← 拓扑块（仅结构）
-    Println <write> io.write      //   复用 edge 语法，无 body
+main {
+    hello happy;          // InstanceDecl：声明一个 entry 实例（@hello 类型，实例名 happy）
+    // EdgeConnDecl（可选）：happy <out> p 等
 }
 ```
 
-#### 3.3.3 拓扑块与边定义的关系
+`main` 节点 body 允许的形式：
 
-```
-   拓扑块（结构层）                 top-level 边（行为层）
-   ┌─────────────────┐           ┌──────────────────────┐
-   │ stdio {         │   匹配    │ Println <write>      │
-   │   Println       │ ←──────→  │   io.write { ... }   │
-   │   <write>       │  (src,    │                      │
-   │   io.write      │  edge,    │ body 写点对点走线    │
-   │ }               │  dst)     │                      │
-   └─────────────────┘           └──────────────────────┘
-```
-
-编译器按 `(src, edge_name, dst)` 三元组在 top-level 找对应边定义。
-
-#### 3.3.4 拓扑块与 export 完全无关
-
-| 维度 | 拓扑块 | @ 前缀 |
+| 形式 | AST 节点 | 含义 |
 | --- | --- | --- |
-| 决定 | 哪些边在包内"连起来" | 哪些节点对包外可见 |
-| 服务 | 编译器分析（数据流图、路径追溯、死代码消除） | 模块系统（可见性） |
-| 范围 | 包内 | 跨包 |
+| `<TypeName> <varName>;` | `InstanceDecl` | 声明一个 entry 实例 |
+| `<src> <edge> <dst>` | `EdgeConnDecl` | 在实例之间连边 |
 
-> 两者**完全正交**，互不干扰。
+`main` body 不允许：
+- ❌ 端口声明 / 变量声明 / 控制流 / sub-instance —— 它只是一个"实例清单 + 连线清单"
+- ❌ 普通函数体语义
 
-#### 3.3.5 编译器用法
+**编译器对 `main` body 的处理**：
+1. `InstanceDecl` → 收集成 `IRTopology.VarInstances`（`name → type` 映射）
+2. `EdgeConnDecl` → 收集成 `IRTopology.InstanceEdges`（`srcInst <edge> dstInst`）
+3. `IRTopology.StartNodes` 从拓扑里挑"有 auto-exec block 的节点"
 
-1. **数据流分析**：沿拓扑条目建有向图
-2. **路径追溯**：外部数据灌入 → Println → io.write → sysio.write → syscall
-3. **死代码消除**：拓扑里没列的边 → 不强制 emit
-4. **跨包递归**：拓扑条目里 dst 是 `io.write` / `sysio.write` 时，递归读那个包的拓扑块 + 边 body
+详见 [3.5](#35-入口保留名main既是包名又是入口节点) 和 [constructor-orchestrator-design.md](file:///home/wpp/homework/Mocker/circle/docs/constructor-orchestrator-design.md)。
 
-### 3.4 三个构造 vs 三个抽象层
+### 3.4 节点 vs 边 速查
 
-|  | 节点 | 边 | 拓扑块 |
-| --- | --- | --- | --- |
-| **定义在哪** | top-level | top-level | 块名 == 包名 |
-| **有 body** | 是 | 是 | **否** |
-| **含数据流** | 否（声明） | 是 | 否（结构） |
-| **含端口声明** | 是 | 否 | 否 |
-| **export 标记** | `@` 前缀 | N/A | N/A |
+|  | 节点 | 边 |
+| --- | --- | --- |
+| **定义在哪** | top-level（`@name { ... }`）| top-level（`src <edge> dst { ... }`）|
+| **有 body** | 是 | 是 |
+| **含数据流** | 否（声明 / 内部 sub-graph）| 是 |
+| **含端口声明** | 是 | 否 |
+| **含控制流** | 是（`if`/`for`/`while`）| 否 |
+| **含 sub-graph** | 是（sub-instance + sub-edge + flow）| 否 |
+| **export 标记** | `@` 前缀 | N/A |
+| **跨包引用** | `@pkg.Node`（CALL token）| `pkg.node` 作为 dst |
+| **保留节点** | `SYSCALL` / `EXIT` / `ALLOC`（语义层识别）| — |
 
-### 3.5 入口保留名：`main` 既是包名又是拓扑块
+### 3.5 入口保留名：`main` 既是包名又是入口节点
 
 > **核心约定**：`main` 是 Mocker 的**保留名**（reserved name），由 dispatcher 强制处理。
 
@@ -480,68 +482,70 @@ stdio {                           // ← 拓扑块（仅结构）
 | 出现位置 | 含义 |
 | --- | --- |
 | `package main` | **入口包**——这个文件是可执行程序的入口点（约定，等价于 Go 的 `package main`） |
-| `main { ... }` | **入口拓扑**——程序启动时建立的初始图结构 |
+| `main { ... }` | **入口节点**——程序启动时 entry instance 的清单 + 连线 |
 
-**两件事统一在 `main` 这一个名字上**：包是 `main`，入口拓扑块也叫 `main`。
+**两件事统一在 `main` 这一个名字上**：包是 `main`，入口节点也叫 `main`。
 
 #### 3.5.2 dispatcher 行为
 
 ```
-看到 IDENT == "main" 且后跟 {     →   永远走 parseTopologyDecl
+看到 IDENT == "main" 且后跟 {     →   永远走 parseStructBody(Kind=Node, Name="main")
                                     不会变成函数、struct、edge
 ```
 
 所以 `package main` 的文件里写 `main { ... }` **不会被当成函数**，也不会有"函数名和包名冲突"的问题。
 
-#### 3.5.3 例子
+#### 3.5.3 例子（M4.5 构造函数编排器模式）
 
 ```ce
 package main
 import stdio
 
-hello {                            // 节点（无入度，创建时自动执行）
-    h := "hello world!"
-    h >>
+hello {
+    h := "hello"
+    world w;               // sub-instance 声明
+    <add_str> w            // 隐式 sub-edge（推断源 h）
+
+    >>str out_str
+    stdio.Println p;       // sub-instance 声明
+    out_str >> p.msg;      // 内部 flow
 }
 
-hello <out> say {                 // top-level 边定义（含 body，走线细节）
-    hello.h >>
-    >>say.hay
-    >>say.my
-    >>say.world
+world {
+    >> str words
+    new := words
+    for(i:=0; i<3; i++) { new += " world!" }
+    new >>
 }
 
-say {                             // 节点（3 个入度 port）
-    >> str hey
-      hey >> stdio.Println         // port-forward 糖
-    >> str my
-        my >> stdio.Println
-    >> str world
-        world >> stdio.Println
+<add_str> {
+    hello.h >> world.words
+    world.new >> hello.out_str
 }
 
-// ═══ 入口拓扑（main 保留名）═══
-// 块体里描述程序启动时建立的连线。
-// 编译器从这个块直接 emit 启动代码，**不再需要单独写 main 函数**。
+// ═══ 入口（main 保留名）═══
 main {
-    hello <out> say                // 启动时建 hello→say 的 <out> 边
+    hello happy;           // 只声明 entry instance
 }
 ```
 
-#### 3.5.4 编译器/运行时从这个块 emit 什么
+构造时，`main()` 调用 `_ = Newhello()`，hello 的构造函数递归创建 world 和 Println 并调用它们的方法。
+
+#### 3.5.4 编译器/运行时从这个节点 emit 什么
 
 ```
-1. 创建所有无入度节点（auto-exec）：
-      hello 创建 → h 字段被赋值 → h 沿出符号流出
+1. 创建所有 entry instance：
+      main { hello happy; }  →  codegen 生成 Newhello() + _ = Newhello()
 
-2. 沿 main 拓扑块建边：
-      hello.h 沿 <out> 边流入 say
+2. hello 的 NewXxx() 递归：
+      hello body 内有 world w / <add_str> w / stdio.Println p / out_str >> p.msg
+      → Newhello() 内部递归 Newworld() / NewPrintln() + 调用边方法
 
-3. 触发有入度节点的 port：
-      say.hey / say.my / say.world 各自激活 → 调 stdio.Println
+3. 触发 auto-exec 节点：
+      hello.auto_exec block 跑 → h 字段被赋值 → h 沿 <add_str> 边流出
 
 4. 整体流程：
-      hello(auto) → h → <out> → say → port → stdio.Println → ... → syscall
+      hello(auto) → h → <add_str> → world → new → hello.out_str → p.msg → syscall
 ```
 
 **整个启动是 declarative 的**——没有 imperative 步骤，全靠图论自动驱动。
@@ -551,45 +555,35 @@ main {
 | | Go | Mocker |
 | --- | --- | --- |
 | 入口包名 | `package main` | `package main` |
-| 入口函数 | `func main()` | `main { ... }` **拓扑块** |
-| 入口体内容 | imperative 语句 | 声明性图结构（连线 + 拓扑） |
+| 入口函数 | `func main()` | `main { ... }` **入口节点** |
+| 入口体内容 | imperative 语句 | 声明性图结构（instance + edge 连接） |
 | 隐式 | 无 | hello 这种无入度节点创建时**自动执行** |
 
 **哲学差异**：Go 的 main 是"程序从这里开始执行"，Mocker 的 main 是"程序从这张图开始存在"——你描述的是"哪些节点和边构成程序"，而不是"按顺序做什么"。
 
-#### 3.5.6 块体里写什么
+#### 3.5.6 入口节点 body 里写什么
 
-`main { ... }` 块体接受**和拓扑块同一种语法**——每行一条 `src <edge_name> dst` 形式的边引用，分号 `;` 可选：
-
-```ce
-main {
-    hello <out> say
-    hello <debug> say       // 同一对节点可以有多条边
-    say <to_stdout> stdio.Println
-}
-```
-
-**禁止的语法**（这些都不是启动时要建的边）：
-- 节点声明（`name { ... }`）——节点要么从其他文件 import，要么通过包内拓扑建
-- 边定义（带 body）——边 body 是"运行时的走线"，不是启动结构
-- 函数声明——入口是拓扑，不是函数
-
-#### 3.5.6 块体里写什么
-
-`main { ... }` 块体接受**和拓扑块同一种语法**——每行一条 `src <edge_name> dst` 形式的边引用，分号 `;` 可选：
+`main { ... }` 节点 body 只声明 **entry instance** + 必要的 **edge 连接**，分号 `;` 可选：
 
 ```ce
 main {
-    hello <out> say
-    hello <debug> say       // 同一对节点可以有多条边
-    say <to_stdout> stdio.Println
+    hello happy;            // InstanceDecl：声明 entry instance
+    happy <out> p           // EdgeConnDecl（可选）：instance 之间连边
 }
 ```
 
-**禁止的语法**（这些都不是启动时要建的边）：
-- 节点声明（`name { ... }`）——节点要么从其他文件 import，要么通过包内拓扑建
-- 边定义（带 body）——边 body 是"运行时的走线"，不是启动结构
-- 函数声明——入口是拓扑，不是函数
+**所有跨实例的边连接、子实例创建，都下放到每个节点自己的 body 中**（构造函数编排器模式）：
+
+```ce
+hello {
+    h := "hello"
+    world w;                // hello 内部：声明 world 实例
+    h <add_str> w           // hello 内部：h → w 边
+    >> out_str
+    stdio.Println p;        // hello 内部：声明 Println 实例
+    out_str >> p.msg;       // hello 内部：out_str → p.msg flow
+}
+```
 
 #### 3.5.7 自举意义
 
@@ -611,15 +605,15 @@ compiler/main.ce        ← Mocker 编译器自己的入口
 
 | 名字 | 角色 | dispatcher 处理 |
 | --- | --- | --- |
-| `main` | 入口保留名 | 走 TopologyDecl |
+| `main` | 入口保留名 | 走 `parseStructBody(Kind=Node, Name="main")` |
 
 未来可能会加更多 reserved name（比如 `init` 用于"在 main 之前执行的初始化"），但当前只要 `main` 一个。
 
-### 3.5.8 M4.5 简化：main 节点极简化（只声明 entry）
+#### 3.5.9 M4.5 简化：main 节点极简化（只声明 entry）
 
 > **M4.5 更新**：去掉 main 节点作为"完整入口拓扑"的概念。
 
-**M4.4 之前**：
+**M4.4 之前**（main body 充当完整拓扑块）：
 ```ce
 main {
     hello happy
@@ -628,7 +622,7 @@ main {
 }
 ```
 
-**M4.5 新设计**：
+**M4.5 新设计**（main body 只声明 entry instance，连线下放到各节点 body）：
 ```ce
 main {
     hello happy;   // 只声明 entry instance
@@ -657,7 +651,7 @@ func main() {
 }
 ```
 
-详见 [constructor-orchestrator-design.md](../circle/docs/constructor-orchestrator-design.md) 和 [execution.md](../circle/docs/execution.md)。
+详见 [constructor-orchestrator-design.md](file:///home/wpp/homework/Mocker/circle/docs/constructor-orchestrator-design.md) 和 [execution.md](file:///home/wpp/homework/Mocker/circle/docs/execution.md)。
 
 ### 3.6 语法糖：节点体内的端口直转发
 
@@ -687,7 +681,7 @@ say {
 }
 ```
 
-**关键点**：这是 **fixed compilation**（固定编译）—— 编译器直接 emit 转发代码，**不经过 EdgeDecl 的运行时边机制**（不开 goroutine、不走拓扑）。
+**关键点**：这是 **fixed compilation**（固定编译）—— 编译器直接 emit 转发代码，**不经过 EdgeDecl 的运行时边机制**（不开 goroutine、不走 IRTopology 分析路径）。
 
 #### 3.5.3 适用条件（必须全部满足）
 
@@ -730,11 +724,11 @@ say {
 | 代码量 | 1 行 | 3-5 行 |
 | 灵活性 | 只支持"无歧义转发" | 任意点对点 |
 | 运行时开销 | 零（编译期展开） | 走边运行时 |
-| 是否进拓扑块 | 否（不进图） | 进拓扑块 |
+| 是否进 IRTopology | 否（不进图） | 进 IRTopology（作为 InstanceEdge） |
 | 能否做跨包链路分析 | 否 | 是 |
 
 **所以糖写法适合**：调单参 utility（如 `Println` / `to_string` / 各种 transform），"数据来了就转一手走人"的场景。
-**不适合**：多参数调用、需要进拓扑块做分析的场景。
+**不适合**：多参数调用、需要 IRTopology 做分析的跨节点连线场景。
 
 #### 3.5.7 当前 stdio 调用写法归类
 
@@ -758,17 +752,13 @@ say {
 
 ```ce
 // stdio 内部
-Println <write> io.write {      // 显式边
+Println <write> io.write {      // 显式边（顶层 EdgeDecl）
     Println.fid  >> io.write.fid
     Println.data >> io.write.data
 }
-
-stdio {                         // 拓扑块列这条边
-    Println <write> io.write
-}
 ```
 
-因为 `io.write` 有 2 个入端口，**必须显式边 + 拓扑**，不能用糖。
+因为 `io.write` 有 2 个入端口，**必须显式边**，不能用糖。`stdio.Println <write> io.write` 这条边通过编译器跨包查找（`Println` 是 stdio 包、`io.write` 是 io 包）拼起来，运行时由 `hello` 节点构造函数递归调用。
 
 #### 3.5.8 糖写法使用 checklist
 
@@ -778,7 +768,7 @@ stdio {                         // 拓扑块列这条边
 3. 类型是不是**对得上**？
 
 3 个都是 YES → 用糖（`port >> target`）。
-任何一个 NO → 用显式边（`port <edge> target { body }` + 拓扑块）。
+任何一个 NO → 用显式边（顶层 `src <edge> dst { body }` + 节点 body 内的 sub-edge `src <edge> dst`）。
 
 ---
 
@@ -919,6 +909,60 @@ cookie[]                // 数组
 
 赋值：`name := expr`
 
+### 5.5 控制流
+
+Mocker 支持 C/Go 风格的控制流语句，**只能出现在节点体内部**。
+
+#### 5.5.1 for 循环
+
+```ce
+// C 风格 for（init; cond; post）
+for(i:=0; i<3; i++) { new += " world!" }
+
+// Go 风格 while（cond only）
+for(i < 10) { process() }
+
+// 带复合赋值的 body
+for(i:=0; i<t; i++) { result += step }
+```
+
+#### 5.5.2 while 循环
+
+```ce
+while(x > 0) { x -= 1 }
+```
+
+codegen 阶段转译为 Go 的 `for x > 0 { ... }`。
+
+#### 5.5.3 if / else if / else
+
+```ce
+// Go 风格（推荐）
+if x > 0 { ... } else if x == 0 { ... } else { ... }
+
+// C 风格（括号可选）
+if (x > 0) { ... } else { ... }
+```
+
+#### 5.5.4 复合赋值与自增自减
+
+```ce
+x += 1      // 等价于 x = x + 1
+y -= 2      // 等价于 x = x - 2
+z *= 3
+w /= 4
+i++         // 仅限 for post 位置
+j--
+```
+
+#### 5.5.5 数学表达式
+
+支持完整的算术表达式（Pratt 算法），含括号和运算符优先级：
+
+```ce
+t := 1+2*1-8+(2+2)*2   // → 3
+```
+
 ---
 
 ## 六、模块可见性：export 与 import
@@ -940,12 +984,14 @@ import stdio
 }
 ```
 
-### 6.3 与拓扑块的边界
+### 6.3 与 sub-graph 的边界
 
 | 概念 | 决定 | 实现机制 |
 | --- | --- | --- |
 | 节点是否包外可见 | `@` 前缀 | 编译期检查 |
-| 边是否在包内"连起来" | 拓扑块条目 | 编译器分析 |
+| 包内节点之间怎么连 | 节点 body 内的 sub-instance + sub-edge + flow | 构造函数编排器模式 |
+
+> 注：**已经没有"包级拓扑块"概念**。`stdio`、`io` 这些包没有 `{ Println <write> io.write }` 这样的块结构——包内节点之间的连线由每个节点 body 自己声明的 sub-graph 表达。
 
 ---
 
@@ -968,13 +1014,12 @@ import stdio
 │       msg + "\n" >>                                     │
 │   }                                                     │
 │   Println <write> io.write { ... }                      │
-│   stdio { Println <write> io.write }                    │
 └────────────────────┬─────────────────────────────────────┘
                      ▼
 ┌──────────────────────────────────────────────────────────┐
 │ io 层（文件描述符抽象）                                  │
 │   @write { >>num fid  >>byte data }                     │
-│   （包内拓扑：io.write → sysio.write）                  │
+│   io.write <syscall> SYSCALL { ... }                    │
 └────────────────────┬─────────────────────────────────────┘
                      ▼
 ┌──────────────────────────────────────────────────────────┐
@@ -1036,7 +1081,7 @@ sysio 必须能用 syscall / RawSyscall 实现，**不能用 cgo / unsafe / refl
 | --- | --- |
 | 包 | `package` / `import` |
 | 声明 | `enum` |
-| 控制流 | `if` / `else` / `return` |
+| 控制流 | `if` / `else` / `for` / `while` / `return` |
 | 字面量 | `true` / `false` |
 | 类型 | `str` / `num` / `bool` / `byte` / `any` |
 | 特殊 | `main`（保留作入口） |
@@ -1047,7 +1092,8 @@ sysio 必须能用 syscall / RawSyscall 实现，**不能用 cgo / unsafe / refl
 | --- | --- |
 | 数据流 | `>>`（流到）/ `<<`（反流） |
 | 边名 | `<` ... `>`（边名括号） |
-| 赋值 | `:=`（声明） / `=`（暂未用） |
+| 赋值 | `:=`（声明） / `=`（暂未用） / `+=` / `-=` / `*=` / `/=` |
+| 自增自减 | `++` / `--`（仅 for post 位置） |
 | 比较 | `==` / `!=` / `<` / `>` / `<=` / `>=` |
 | 逻辑 | `&&` / `\|\|` / `!` |
 | 算术 | `+` / `-` / `*` / `/` |
@@ -1080,23 +1126,24 @@ sysio 必须能用 syscall / RawSyscall 实现，**不能用 cgo / unsafe / refl
 | `PackageDecl` | `package main` | |
 | `ImportDecl` | `import stdio` | |
 | `EnumDecl` | `enum Method { ... }` | |
-| `StructDecl` | `name { ... }` / `@name { ... }` | 节点（@ 前缀）也是 StructDecl |
+| `StructDecl` | `name { ... }` / `@name { ... }` / `main { ... }` | 节点（@ 前缀）也是 StructDecl；`main` 是 `StructKindNode` |
 | `EdgeDecl` | `src <edge> dst { ... }` | |
-| `FuncDecl` | `main { ... }` | |
-| `TopologyDecl` *（草案）* | `pkgname { edge-refs }` | 复用 EdgeDecl，只 body 为空 |
 
-### 10.2 语句 Stmt
+### 10.2 StructMember（节点体内的成员）
 
 | 节点 | 例子 |
 | --- | --- |
-| `IfStmt` | `if cond { ... } else { ... }` |
-| `ReturnStmt` | `return v` |
-| `Connection` | `hello <out> say` |
-| `FlowStmt` | `a >> b >> c`（单链） |
-| `FlowCont` | `>>say.hay`（续行） |
-| `FlowFanout` | `src >> + 多个 >>branches`（并发扇出） |
-| `VarDecl` / `AssignStmt` | `h := "..."` / `a, b := expr` |
-| `ExprStmtWrap` | 表达式当语句 |
+| `PortDecl` | `>> str msg`（入端口）/ `name >>`（出端口） |
+| `VarDecl` | `h := "hello"` |
+| `FieldDecl` | `str name`（类型字段） |
+| `AssignStmt` | `a = expr` / `a += expr` / `i++` |
+| `FlowDecl` | `out_str >> p.msg`（内部 flow） |
+| `SubInstanceDecl` | `world w;`（子实例声明） |
+| `SubEdgeDecl` | `h <add_str> w` 或 `<add_str> w`（隐式推断） |
+| `InstanceDecl` | `hello happy`（main 节点内的 entry 实例） |
+| `ForStmt` | `for(i:=0; i<3; i++) { ... }` |
+| `WhileStmt` | `while(cond) { ... }` |
+| `IfStmt` | `if cond { ... } else if ... { ... } else { ... }` |
 
 ### 10.3 FlowStep 内部
 
@@ -1165,16 +1212,16 @@ Mocker 编译器（M1 → M10 阶段）最终能用 Mocker 自己写出来，即
 | 决策 | 选择 | 理由 |
 | --- | --- | --- |
 | 文件后缀 | `.ce`（非 `.mocker`） | 反映自举目标，更严谨 |
-| 图形化 vs 过程化 | 图形化 | 节点 / 边 / 拓扑块分立，无"先做 A 再做 B" |
+| 第一公民数量 | **只有节点 + 边两种**（M4.5 取消拓扑块） | 减少概念；包内连线由节点 body 内的 sub-graph 承担 |
+| 图形化 vs 过程化 | 图形化 | 节点 / 边分立，无"先做 A 再做 B" |
 | 出口标记 | `@` 前缀 | 不加新关键字，复用现有符号 |
-| 拓扑块识别 | 块名 == 包名 | 不加新关键字，纯靠命名约定 |
-| 拓扑块语法 | 复用 edge 语法 | 不引入新语法元素，零学习成本 |
+| main 节点 | 只声明 entry instance | 所有编排下放到各节点 body（构造函数编排器模式） |
 | 三层架构 | sysio / io / stdio | 机制 / 抽象 / 语义清晰分离 |
 | sysio 边界 | 编译器硬编码 emit | 单一可信源，简化跨平台 |
-| fan-out 触发 | 连续 `>>` `>>` | 现有 token 就能表达，不加关键字 |
-| AST 表达 fan-out | 专用 `FlowFanout` 节点 | 语义不混在 FlowStmt 里 |
-| 数据流方向 | 左 → 右（`a >> b`） | 符合自然阅读顺序 |
-| **port-forward sugar** | `port >> target`（单参）→ 编译期展开为隐式边 | 调用方写 1 行，编译器直接 emit 转发代码（不进拓扑块） |
+| 控制流 | 透传 Go 语法 | for/while/if 直接转译为 Go 代码，无需 IR 解析 |
+| 隐式 SubEdge | 类型唯一匹配推断 | `<add_str> w` 省略源变量，编译器自动推断 |
+| 数学表达式 | Pratt 算法 | 正确处理运算符优先级和结合性 |
+| CLI | `circle build` | 简化为单命令 + `-debug` 标志 |
 
 ---
 
@@ -1182,14 +1229,9 @@ Mocker 编译器（M1 → M10 阶段）最终能用 Mocker 自己写出来，即
 
 | 项 | 状态 | 备注 |
 | --- | --- | --- |
-| `TopologyDecl` AST 节点 | 草案，注释中 | 等用户拍板最后两个细节（跨包条目 + 不一致时报错 vs 警告） |
-| `FlowBranch` AST 节点 | 草案，注释中 | fan-out 的分支节点 |
-| 端口体（`>>str msg { ... }`） | 暂未支持 | 需要 lexer 支持 INDENT/DEDENT |
-| `parseTopologyDecl` 真函数 | 未实现 | AST 节点落地后一并写 |
-| 字符串字面量 `'...'` | 不支持 | lexer 只识别 `"..."` |
-| 注释（`/* */` 块注释） | 已识别 | parser 会跳过 |
-| **port-forward sugar 编译器识别** | 文档已写（§3.5），编译器侧未实现 | 目前是约定，靠同名 struct member 隐式连接；要真"fixed compilation"得在 IR 阶段加识别 |
+| `FlowBranch` AST 节点 | 草案 | fan-out 的分支节点 |
+| 多 SubEdge 同一目标时的排序和合并 | 待优化 | — |
+| 循环依赖检测 | 待优化 | 防止无限递归 |
+| CI / release | 未开始 | — |
 
----
-
-> **下一步**：把 `TopologyDecl` / `FlowBranch` AST 节点和 `parseTopologyDecl` 函数一起实现，让 [example/stdio/stdio.ce](file:///home/wpp/homework/Mocker/example/stdio/stdio.ce) 末尾的 `stdio { Println <write> io.write }` 能 dump 出来。
+> **已完成**：构造函数编排器模式、隐式 SubEdge 推断、控制流（for/while/if）、复合赋值、数学表达式、双向边 d2 图、简化的 CLI（`circle build`）。

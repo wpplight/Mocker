@@ -2,7 +2,7 @@
 
 > 从 `mocker_lex.Tokenize` 的 token 流到一棵强类型的 AST
 >
-> 配套：[main.ebnf](../main.ebnf) (语法) / [lexer.go](../mocker_lex/lexer.go) (词法)
+> 配套：[lexer.go](../mocker_lex/lexer.go) (词法) / [language.md](../../docs/language.md) (语言规范)
 
 ---
 
@@ -11,7 +11,7 @@
 ### 1.1 Parser 在编译器中的位置
 
 ```
-源 .mocker 文件
+源 .ce 文件
       ↓
 ┌──────────────┐
 │ mocker_lex   │   ← 已完成：字符 → []Token

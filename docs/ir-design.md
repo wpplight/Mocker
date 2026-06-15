@@ -36,10 +36,10 @@
 
 ### 流程
 1. 遍历所有包，每包建 `IRPackage`
-2. 每包里每个 `StructDecl`（@name）→ `IRNode`
+2. 每包里每个 `StructDecl`（@name / 普通 node）→ `IRNode`
 3. 每包里每个 `EdgeDecl` → `IREdge`（含 kind 从 semantic.EdgeKinds 取）
-4. 每包里每个 `TopologyDecl` → `IRTopology`（去重 + 收集 AllNodes）
-5. 调 `prog.AnalyzeTopology()` 填 `UsedBlocks` + `AutoExecNodes`
+4. 每包里名为 `main` 的 `StructDecl` 节点 body → `IRTopology`（从 `InstanceDecl` + `EdgeConnDecl` 收集 VarInstances / InstanceEdges / StartNodes）
+5. 调 `prog.AnalyzeTopology()` 填 `UsedBlocks` + `AutoExec`
 
 ### 节点降级（`lowerStruct`）
 - `PortDecl` → `IRInput`
@@ -55,10 +55,12 @@
   - `FlowCont`：同 FlowStmt
 - 每个 `IRFlowOp` 有 `Src/SrcAttr/Dst/DstAttr`（target 拆 node 名 + attr 名）
 
-### 拓扑降级（`lowerTopology`）
-- `TopologyDecl.Edges`（`*ast.EdgeDecl`）→ `IRTopology.Edges`（`[]EdgeKey`）
+### 拓扑降级（`lowerMainTopology`）
+- 从名为 `main` 的 `StructDecl` 节点 body 收集：
+  - `InstanceDecl`（`hello happy;`）→ `IRTopology.VarInstances[name] = type`
+  - `EdgeConnDecl`（`happy <out> p`）→ `IRTopology.InstanceEdges[]`
 - 去重 + 收集 `AllNodes`（去重）
-- 后续 `AnalyzeTopology` 计算 `AutoExecNodes`
+- 后续 `AnalyzeTopology` 计算 `StartNodes`（含 auto-exec block 的节点）
 
 ### 验证
 `circle ir` 子命令 dump 实际 IR（5 个包全部拍平，nodes/edges/topology 完整）。
@@ -111,7 +113,7 @@ type IRPackage struct {
     Name     string
     Nodes    map[string]*IRNode
     Edges    map[EdgeKey]*IREdge
-    Topology *IRTopology           // 每个包都有（main 是启动序列，其他是内部路由）
+    Topology *IRTopology           // 只有 main 包有（从入口节点 body 推导）
     IsMain   bool                  // 是否是入口包
 }
 
@@ -120,20 +122,20 @@ type EdgeKey struct {
 }
 ```
 
-**每个包都有自己的 Topology**（不只 main 包）：
-- **main 包的 Topology** = 启动序列（程序从这里开始跑）
-- **其他包的 Topology** = 内部路由（描述包内数据怎么流动）
+**只有 main 包有 Topology**（从 `main` 节点 body 推导）：
+- **main 包的 Topology** = 入口节点 `main` body 里的 `InstanceDecl` + `EdgeConnDecl`
+- **其他包没有 Topology**（包内节点之间的连线由各节点 body 内的 sub-instance + sub-edge + flow 表达）
 
-例：stdio 包有
+例：main 节点 body 收集到的 entry：
 
-```
-stdio {
-    Println <write> io.write   // 内部拓扑：Println 收到的数据路由给 io.write
+```ce
+main {
+    hello happy;                // InstanceDecl → VarInstances["happy"] = "hello"
+    happy <out> p               // EdgeConnDecl → InstanceEdges[]
 }
 ```
 
-这个拓扑告诉编译器：stdio 包内部，Println 收到的数据应该路由给 io.write。  
-（main 包的拓扑是"程序从哪儿启动"，stdio 这种是"包内部数据怎么路由"——用途不同但机制一样。）
+构造函数编排器模式：每个节点的 `NewXxx()` 递归构造 sub-instance + 调用 sub-edge 方法（详见 [constructor-orchestrator-design.md](../circle/docs/constructor-orchestrator-design.md)）。
 
 ### 2.2 节点
 
@@ -226,7 +228,7 @@ type IRBlock struct {
 - 每个节点 = 1 个内含 n 个 block 的图
 - 每个 block = a 个入度 + b 个出度 + body
 - a=0 → auto-exec（创建即跑）
-- blocks 在源码里不必连续，**emit 时按拓扑裁减**
+- blocks 在源码里不必连续；M4.5 之后**所有 block 都 emit**（构造函数编排器按需调 method）
 
 ### 2.4 边
 
@@ -276,16 +278,27 @@ const (
 )
 ```
 
-### 2.6 拓扑
+### 2.6 入口拓扑（仅 main 包）
 
 ```go
 type IRTopology struct {
-    Edges         []EdgeKey
-    AutoExecNodes []string   // 无入度的节点
-    AllNodes      []string
+    Edges         []EdgeKey      // 顶层边列表（跨包用，本语义下基本不用）
+    StartNodes    []string       // 程序启动时要主动跑的节点（main 包专属，含 auto-exec 的节点）
+    AllNodes      []string       // main body 里出现过的所有 instance
+    VarInstances  map[string]string  // instance name → type name（`hello happy;` → "happy": "hello"）
+    InstanceEdges []InstanceEdge // main body 里的 EdgeConnDecl（`happy <out> p` → InstanceEdge{Src:"happy", Edge:"out", Dst:"p"}）
     Pos           ast.Pos
 }
+
+// InstanceEdge main body 里的边（instance-level）
+type InstanceEdge struct {
+    SrcInstance string  // 源实例名（如 "happy"）
+    Edge        string  // 边名（如 "out"）
+    DstInstance string  // 目标实例名（如 "p"）
+}
 ```
+
+> M4.5 起 `IRTopology` 只承载 **main 包入口节点的 InstanceDecl + EdgeConnDecl**；包内节点之间的连线由各节点 body 的 sub-graph 表达。
 
 ---
 
@@ -298,7 +311,7 @@ type IRTopology struct {
 | async edge | `IREdge{Kind:Async}` | goroutine + `dst.in <- src.out` |
 | async + ack | `IREdge{Kind:Async, HasAck:true}` | 加 ack channel，goroutine 等收到 ack 再继续 |
 | auto-exec block | `IRBlock{IsAutoExec:true}` | 启动时直接 `go n.runBlock(i)` |
-| 拓扑块 | `IRTopology` | `main()` 里建所有 edge，启 auto-exec goroutine |
+| 拓扑块（取消） | ~~`IRTopology`~~ | 已删除（M4.5）。main 包入口节点 body 由 `IRTopology` 收集 InstanceEdges + VarInstances + StartNodes；构造函数编排器按 sub-edge 递归构造 |
 | 入度前初始化 | `IRNode.Init` | `func (n *N) init() { ... }`，在节点创建时调一次 |
 | 状态字段 | `IRNode.State` | `n.field` 持久化在 struct 里 |
 
@@ -371,6 +384,8 @@ func (s *Say) Run() {
 
 **关键优化**（用户拍板）：每个 node 按拓扑块用到哪些 in/out，**只生成用到的 block 的代码**。
 
+> **M4.5 之后**：构造函数编排器模式下，**所有 block 默认 emit**，pruning 不再决定生死。此节保留作为历史参考。
+
 ### 6.1 流程
 
 1. **收集引用**：遍历所有 edge.Flow，记录每个 (node, attr) 是否被引用
@@ -381,7 +396,7 @@ func (s *Say) Run() {
    - 节点至少有一个 block 是 IsAutoExec 且被引用 → 节点是 AutoExec
 4. **填 AutoExecNodes**：拓扑边集合里没出现过的节点 = 无入度 = auto-exec
 
-### 6.2 例子
+### 6.2 例子（M4.5 之前）
 
 ```
 @Println {           // 3 个 block:
@@ -391,12 +406,12 @@ func (s *Say) Run() {
     ...
 }
 
-main {
+stdio {
     Println <write> io.write   // 只引用了 msg → 没用 stdio.Println
 }
 ```
 
-裁减后，Println 只 emit block0 + block1 的代码，stdio.Println 完全不 emit。
+> **注意**：M4.5 起已取消 `stdio { ... }` 拓扑块。连线由各节点 body 内的 sub-instance + sub-edge 表达，构造函数编排器模式不需要按"拓扑引用关系"裁剪 block，**所有 block 默认 emit**（构造函数会按需调 method）。pruning 分析的细节保留在 `AnalyzeTopology` 里做兜底，但不再决定生死。
 
 ---
 
@@ -494,13 +509,15 @@ codegen.Emit(goAST, "main.go")
 
 ## 十二、示例：从 main.ce 到 IR
 
+> 这是 M4.5 之前的示例（用"拓扑块"组织图）。M4.5 起已改为**节点 body 内 sub-graph + 构造函数编排器**模式，main body 只声明 entry instance。详见 §3.0.4 和 [constructor-orchestrator-design.md](../circle/docs/constructor-orchestrator-design.md)。
+
 ```
 Mocker 源码：
 hello {
     h := "hello world!"
     h >>
 }
-hello <out> say {
+hello <out> say {            // 顶层边
     hello.h >>
     >>say.hey
     >>say.my
@@ -508,14 +525,14 @@ hello <out> say {
 }
 say {
     >> str hey
-      hey >> stdio.Println
+      hey >> stdio.Println   // 糖
     >> str my
         my >> stdio.Println
     >> str world
         world >> stdio.Println
 }
-main {
-    hello <out> say
+main {                       // 入口节点（M4.5 起只声明 entry instance）
+    hello happy;
 }
 ```
 
@@ -558,12 +575,16 @@ IREdge{
     ],
 }
 
-IRTopology{
-    Edges: [{Src:"hello", Name:"out", Dst:"say"}],
-    AutoExecNodes: ["hello"],   // 无入度
+IRTopology{                          // M4.5 起：从 main 节点 body 推导
+    Edges: [{Src:"hello", Name:"out", Dst:"say"}],   // 顶层边
+    StartNodes: ["hello"],   // 有 auto-exec 的节点
     AllNodes: ["hello", "say"],
+    VarInstances: {"happy": "hello"},   // main { hello happy; }
+    InstanceEdges: [],                  // main body 里没显式写 EdgeConnDecl
 }
 ```
+
+> M4.5 起构造函数编排器模式：`main()` 直接调 `Newhello()`，hello 内部递归构造 sub-instance + 调 sub-edge 方法，不再由 codegen 在 main 里手写 wiring。
 
 ↓ codegen emit：
 
@@ -624,17 +645,18 @@ func main() {
 | 项 | 决策 |
 | --- | --- |
 | A. 整体 IR 结构 | 拆 `IRPackage[]` + 顶层 `IRTopology` |
-| A. main 识别 | `PkgName == "main"` 的包，其拓扑块 = 启动序列 |
-| A. 拓扑嵌入 | 顶层 `IRProgram.Topology`（main 包专属）|
+| A. main 识别 | `PkgName == "main"` 的包，**入口节点 `main` body** 收集成 `IRTopology.VarInstances` / `InstanceEdges` |
+| A. 拓扑嵌入 | 顶层 `IRProgram.Topology`（main 包专属，从 `main` 节点 body 推导）|
+| A. **取消"包级拓扑块"**（M4.5） | 包内节点连线由各节点 body 的 sub-instance + sub-edge 承担；构造函数编排器模式 |
 | B. Goroutine 策略 | 边决定；sync = 函数调用，async = goroutine + channel |
 | B. Auto-exec | 节点某个 block 无入度且被拓扑引用 → AutoExec |
-| B. Node 形态 | struct-like，可有 init 和 state |
-| B. 拓扑裁减 | emit 时按拓扑用到的 block 裁减 |
+| B. Node 形态 | struct-like，可有 init 和 state；节点 body 内可声明 sub-instance + sub-edge + flow |
+| B. 拓扑裁减 | emit 时按拓扑用到的 block 裁减（M4.5 之后：构造函数按需调 method，pruning 仅做兜底） |
 | C. Edge 字段 | src/name/dst/kind/branches/hasAck/flow |
-| D. Topology 字段 | edges + autoExecNodes + allNodes |
+| D. Topology 字段 | InstanceEdges + VarInstances + StartNodes + AllNodes |
 | E. Type | 基础类型 + 用户自定义（按名字）|
 | F. 传输 | sync = 函数调用，async = channel（可选 ack）|
-| G. Node → Go | struct + chan 字段 + run()，sync edge 函数调用，async goroutine spawn |
+| G. Node → Go | struct + chan 字段 + run()，sync edge 函数调用，async goroutine spawn；M4.5 起构造函数编排器直接 emit 嵌套构造 |
 
 ---
 

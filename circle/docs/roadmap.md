@@ -3,10 +3,10 @@
 > 从当前状态到"编译出来一个能跑的 Go 二进制"，**还差什么 / 怎么排期 / 关键决策**
 >
 > 配套文档：
-> - [Mocker架构设计.md](../../docs/Mocker架构设计.md) — 整体里程碑（M0–M10）
 > - [ast_design.md](./ast_design.md) — AST 节点设计
-> - [parser.md](../../docs/parser.md) — Parser 实现细节
+> - [execution.md](./execution.md) — 执行文档（构造函数编排器）
 > - [../../docs/language.md](../../docs/language.md) — 语言规范
+> - [../../docs/ir-design.md](../../docs/ir-design.md) — IR 设计
 
 ---
 
@@ -22,13 +22,16 @@
 | **IR** | M4 上半 | ✅ 数据结构 + Lower + dump + AnalyzeTopology | ✅ 完成 |
 | **Codegen（直链 + Run 方法）** | M4.3 | ✅ 完成 | ✅ 完成 |
 | **Codegen（图分析 + dead-code 消除）** | M4.4 | ✅ 完成 | ✅ 完成 |
-| **Codegen（构造函数编排器模式）** | M4.5 | 🟡 实施中 | 1-2 天 |
-| 节点 body 内的 sub-graph 语法 | M4.5a | 🟡 实施中 | — |
-| 构造函数 emit 改造 | M4.5b | 🟡 实施中 | — |
-| 端到端 hello world 验证 | M4.5c | ⏳ 待验证 | — |
+| **Codegen（构造函数编排器模式）** | M4.5 | ✅ 完成 | ✅ 完成 |
+| 节点 body 内的 sub-graph 语法 | M4.5a | ✅ 完成 | — |
+| 构造函数 emit 改造 | M4.5b | ✅ 完成 | — |
+| 端到端 hello world 验证 | M4.5c | ✅ 完成 | — |
+| **隐式 SubEdge 推断** | M4.6 | ✅ 完成（`<add_str> w` 语法糖）| — |
+| **控制流（for/while/if）** | M4.7 | ✅ 完成 | — |
+| **数学表达式** | M4.7a | ✅ 完成（Pratt 算法）| — |
 | **Runtime（Go 写）** | M5 | ⏸️ 暂停（已合并到 codegen）| — |
-| **CLI build pipeline** | M6 | ✅ 完成（`circle run` 已能编译+跑）| — |
-| **端到端验证** | M7 | 🟡 部分验证（hello world）| 1-2 天 |
+| **CLI build pipeline** | M6 | ✅ 完成（`circle build`）| — |
+| **端到端验证** | M7 | ✅ 完成（hello world with for loop）| — |
 | **CI / release** | M10 | ❌ 未开始 | 1 天 |
 
 **MVP 路径：2 周**（12 个工作日）。**生产质量：4 周**（20 个工作日 + bug 修复 + 文档）。
@@ -59,10 +62,10 @@ mocker_lex/
 internal/parser/
 ├── ast/ast.go        # AST 节点定义
 ├── parser.go         # Parser 框架 + helper
-├── parse_file.go     # 顶层调度 + TopologyDecl
-├── parse_decl.go     # StructDecl / EdgeDecl / TopologyDecl / typed-var
+├── parse_file.go     # 顶层调度（M4.5 起：main 节点化为 StructDecl，无 TopologyDecl）
+├── parse_decl.go     # StructDecl / EdgeDecl / InstanceDecl / SubInstanceDecl / typed-var
 ├── parse_flow.go     # FlowStmt / FlowCont / FlowFanout / FlowBranch / FlowExpr
-├── parse_stmt.go     # Connection / IfStmt / ReturnStmt
+├── parse_stmt.go     # Connection / IfStmt / ForStmt / WhileStmt / ReturnStmt
 ├── parse_func.go      # FuncDecl
 ├── parse_expr.go     # Pratt 表达式
 ├── parse_type.go     # TypeRef
